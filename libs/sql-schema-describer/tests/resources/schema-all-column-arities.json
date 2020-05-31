@@ -6,30 +6,33 @@
         {
           "name": "column1",
           "tpe": {
-            "raw": "int",
-            "family": "int"
+            "dataType": "integer",
+            "fullDataType": "int",
+            "family": "int",
+          "arity": "required"
           },
-          "arity": "required",
           "default": null,
           "autoIncrement": false
         },
         {
           "name": "column2",
           "tpe": {
-            "raw": "int",
-            "family": "int"
+            "dataType": "integer",
+            "fullDataType": "int",
+            "family": "int",
+          "arity": "nullable"
           },
-          "arity": "nullable",
           "default": null,
           "autoIncrement": false
         },
         {
           "name": "column3",
           "tpe": {
-            "raw": "int",
-            "family": "int"
+            "dataType": "integer",
+            "fullDataType": "int",
+            "family": "int",
+          "arity": "list"
           },
-          "arity": "list",
           "default": null,
           "autoIncrement": false
         }

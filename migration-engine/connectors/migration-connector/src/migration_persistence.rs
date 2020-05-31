@@ -1,85 +1,73 @@
-use crate::steps::*;
+use crate::{error::ConnectorError, steps::*};
 use chrono::{DateTime, Utc};
-use datamodel::Datamodel;
-use serde::{Serialize};
+use datamodel::{ast::SchemaAst, error::ErrorCollection, Datamodel};
+use serde::Serialize;
 
-
-/// This trait is implemented by each connector. It provides a generic API to store and retrieve [Migration](struct.Migration.html) records. 
-pub trait MigrationPersistence: Send + Sync + 'static {
+/// This trait is implemented by each connector. It provides a generic API to store and retrieve [Migration](struct.Migration.html) records.
+#[async_trait::async_trait]
+pub trait MigrationPersistence: Send + Sync {
     /// Initialize migration persistence state. E.g. create the migrations table in an SQL database.
-    fn init(&self);
+    async fn init(&self) -> Result<(), ConnectorError>;
 
     /// Drop all persisted state.
-    fn reset(&self);
+    async fn reset(&self) -> Result<(), ConnectorError>;
 
-    /// Returns the currently active Datamodel.
-    fn current_datamodel(&self) -> Datamodel {
-        self.last().map(|m| m.datamodel).unwrap_or_else(Datamodel::empty)
+    async fn last_non_watch_applied_migration(&self) -> Result<Option<Migration>, ConnectorError> {
+        let migration =
+            self.load_all().await?.into_iter().rev().find(|migration| {
+                !migration.is_watch_migration() && migration.status == MigrationStatus::MigrationSuccess
+            });
+
+        Ok(migration)
     }
 
-    fn last_non_watch_datamodel(&self) -> Datamodel {
-        let mut all_migrations = self.load_all();
+    async fn last_non_watch_migration(&self) -> Result<Option<Migration>, ConnectorError> {
+        let mut all_migrations = self.load_all().await?;
         all_migrations.reverse();
-        all_migrations
-            .into_iter()
-            .find(|m| !m.is_watch_migration())
-            .map(|m| m.datamodel)
-            .unwrap_or(Datamodel::empty())
+        let migration = all_migrations.into_iter().find(|m| !m.is_watch_migration());
+
+        Ok(migration)
     }
 
     /// Returns the last successful Migration.
-    fn last(&self) -> Option<Migration>;
+    async fn last(&self) -> Result<Option<Migration>, ConnectorError>;
 
     /// Fetch a migration by name.
-    fn by_name(&self, name: &str) -> Option<Migration>;
+    async fn by_name(&self, name: &str) -> Result<Option<Migration>, ConnectorError>;
 
-    // this power the listMigrations command
-    fn load_all(&self) -> Vec<Migration>;
+    /// This powers the listMigrations command.
+    async fn load_all(&self) -> Result<Vec<Migration>, ConnectorError>;
 
-    // loads all current trailing watch migrations from Migration Event Log
-    fn load_current_watch_migrations(&self) -> Vec<Migration> {
-        let mut all_migrations = self.load_all();
-        let mut result = Vec::new();
-        // start to take all migrations from the back until we hit a migration that is not watch
-        all_migrations.reverse();
-        for migration in all_migrations {
-            if migration.is_watch_migration() {
-                result.push(migration);
-            } else {
-                break;
-            }
-        }
-        // reverse the result so the migrations are in the right order again
-        result.reverse();
-        result
-    }
-
-    fn load_all_datamodel_steps_from_all_current_watch_migrations(&self) -> Vec<MigrationStep> {
-        let all_watch_migrations = self.load_current_watch_migrations();
-        let mut all_steps_from_all_watch_migrations = Vec::new();
-        for mut migration in all_watch_migrations.into_iter() {
-            all_steps_from_all_watch_migrations.append(&mut migration.datamodel_steps);
-        }
-        all_steps_from_all_watch_migrations
-    }
-
-    // writes the migration to the Migration table
-    fn create(&self, migration: Migration) -> Migration;
+    /// Write the migration to the Migration table.
+    async fn create(&self, migration: Migration) -> Result<Migration, ConnectorError>;
 
     /// Used by the MigrationApplier to write the progress of a [Migration](struct.Migration.html)
     /// into the database.
-    fn update(&self, params: &MigrationUpdateParams);
+    async fn update(&self, params: &MigrationUpdateParams) -> Result<(), ConnectorError>;
+
+    /// Returns whether the migration with the provided migration id has already been successfully applied.
+    ///
+    /// The default impl will load all migrations and scan for the provided migration id. Implementors are encouraged to implement this more efficiently.
+    async fn migration_is_already_applied(&self, migration_id: &str) -> Result<bool, ConnectorError> {
+        let migrations = self.load_all().await?;
+
+        let already_applied = migrations
+            .iter()
+            .any(|migration| migration.status == MigrationStatus::MigrationSuccess && migration.name == migration_id);
+
+        Ok(already_applied)
+    }
 }
 
 /// The representation of a migration as persisted through [MigrationPersistence](trait.MigrationPersistence.html).
-#[derive(Debug, PartialEq, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Migration {
     pub name: String,
     pub revision: usize,
     pub status: MigrationStatus,
     pub applied: usize,
     pub rolled_back: usize,
-    pub datamodel: Datamodel,
+    pub datamodel_string: String,
     pub datamodel_steps: Vec<MigrationStep>,
     pub database_migration: serde_json::Value,
     pub errors: Vec<String>,
@@ -117,9 +105,9 @@ impl Migration {
             name: name,
             revision: 0,
             status: MigrationStatus::Pending,
+            datamodel_string: String::new(),
             applied: 0,
             rolled_back: 0,
-            datamodel: Datamodel::empty(),
             datamodel_steps: Vec::new(),
             database_migration: serde_json::to_value("{}").unwrap(),
             errors: Vec::new(),
@@ -149,6 +137,14 @@ impl Migration {
         let naive = chrono::NaiveDateTime::from_timestamp(secs, nsecs);
         let datetime: DateTime<Utc> = DateTime::from_utc(naive, Utc);
         datetime
+    }
+
+    pub fn parse_datamodel(&self) -> Result<Datamodel, (ErrorCollection, String)> {
+        datamodel::parse_datamodel(&self.datamodel_string).map_err(|err| (err, self.datamodel_string.clone()))
+    }
+
+    pub fn parse_schema_ast(&self) -> Result<SchemaAst, (ErrorCollection, String)> {
+        datamodel::parse_schema_ast(&self.datamodel_string).map_err(|err| (err, self.datamodel_string.clone()))
     }
 }
 
@@ -194,33 +190,52 @@ impl MigrationStatus {
             _ => panic!("MigrationStatus {:?} is not known", s),
         }
     }
+
+    pub fn is_success(&self) -> bool {
+        match self {
+            MigrationStatus::MigrationSuccess => true,
+            _ => false,
+        }
+    }
+
+    pub fn is_pending(&self) -> bool {
+        match self {
+            MigrationStatus::Pending => true,
+            _ => false,
+        }
+    }
 }
 
 /// A no-op implementor of [MigrationPersistence](trait.MigrationPersistence.html).
 pub struct EmptyMigrationPersistence {}
 
+#[async_trait::async_trait]
 impl MigrationPersistence for EmptyMigrationPersistence {
-    fn init(&self) {}
-
-    fn reset(&self) {}
-
-    fn last(&self) -> Option<Migration> {
-        None
+    async fn init(&self) -> Result<(), ConnectorError> {
+        Ok(())
     }
 
-    fn by_name(&self, _name: &str) -> Option<Migration> {
-        None
+    async fn reset(&self) -> Result<(), ConnectorError> {
+        Ok(())
     }
 
-    fn load_all(&self) -> Vec<Migration> {
-        Vec::new()
+    async fn last(&self) -> Result<Option<Migration>, ConnectorError> {
+        Ok(None)
     }
 
-    fn create(&self, _migration: Migration) -> Migration {
+    async fn by_name(&self, _name: &str) -> Result<Option<Migration>, ConnectorError> {
+        Ok(None)
+    }
+
+    async fn load_all(&self) -> Result<Vec<Migration>, ConnectorError> {
+        Ok(Vec::new())
+    }
+
+    async fn create(&self, _migration: Migration) -> Result<Migration, ConnectorError> {
         unimplemented!("Not allowed on a EmptyMigrationPersistence")
     }
 
-    fn update(&self, _params: &MigrationUpdateParams) {
+    async fn update(&self, _params: &MigrationUpdateParams) -> Result<(), ConnectorError> {
         unimplemented!("Not allowed on a EmptyMigrationPersistence")
     }
 }

@@ -1,52 +1,46 @@
-use crate::filter::RecordFinder;
+use crate::filter::Filter;
 use failure::{Error, Fail};
-use prisma_models::prelude::{DomainError, GraphqlId, ModelRef, PrismaValue};
-use std::fmt;
+use prisma_models::prelude::DomainError;
+use user_facing_errors::{query_engine::DatabaseConstraint, KnownError};
 
-#[derive(Debug)]
-pub struct RecordFinderInfo {
-    pub model: String,
-    pub field: String,
-    pub value: PrismaValue,
+#[derive(Debug, Fail)]
+#[fail(display = "{}", kind)]
+pub struct ConnectorError {
+    /// An optional error already rendered for users in case the migration core does not handle it.
+    pub user_facing_error: Option<KnownError>,
+    /// The error information for internal use.
+    pub kind: ErrorKind,
 }
 
-impl RecordFinderInfo {
-    pub fn for_id(model: ModelRef, value: &GraphqlId) -> Self {
-        Self {
-            model: model.name.clone(),
-            field: model.fields().id().name.clone(),
-            value: PrismaValue::from(value.clone()),
-        }
-    }
-}
+impl ConnectorError {
+    pub fn from_kind(kind: ErrorKind) -> Self {
+        let user_facing_error = match &kind {
+            ErrorKind::NullConstraintViolation { constraint } => Some(
+                KnownError::new(user_facing_errors::query_engine::NullConstraintViolation {
+                    constraint: constraint.to_owned(),
+                })
+                .unwrap(),
+            ),
+            _ => None,
+        };
 
-impl fmt::Display for RecordFinderInfo {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(
-            f,
-            "field {} in model {} with value {}",
-            self.model, self.field, self.value
-        )
-    }
-}
-
-impl From<&RecordFinder> for RecordFinderInfo {
-    fn from(ns: &RecordFinder) -> Self {
-        Self {
-            model: ns.field.model().name.clone(),
-            field: ns.field.name.clone(),
-            value: ns.value.clone(),
+        ConnectorError {
+            user_facing_error,
+            kind,
         }
     }
 }
 
 #[derive(Debug, Fail)]
-pub enum ConnectorError {
-    #[fail(display = "Unique constraint failed: {}", field_name)]
-    UniqueConstraintViolation { field_name: String },
+pub enum ErrorKind {
+    #[fail(display = "Unique constraint failed: {}", constraint)]
+    UniqueConstraintViolation { constraint: DatabaseConstraint },
 
-    #[fail(display = "Null constraint failed: {}", field_name)]
-    NullConstraintViolation { field_name: String },
+    #[fail(display = "Null constraint failed: {}", constraint)]
+    NullConstraintViolation { constraint: DatabaseConstraint },
+
+    #[fail(display = "Foreign key constraint failed")]
+    ForeignKeyConstraintViolation { constraint: DatabaseConstraint },
 
     #[fail(display = "Record does not exist.")]
     RecordDoesNotExist,
@@ -54,17 +48,17 @@ pub enum ConnectorError {
     #[fail(display = "Column does not exist")]
     ColumnDoesNotExist,
 
-    #[fail(display = "Error creating a database connection.")]
+    #[fail(display = "Error creating a database connection. ({})", _0)]
     ConnectionError(Error),
 
     #[fail(display = "Error querying the database: {}", _0)]
-    QueryError(Error),
+    QueryError(Box<dyn std::error::Error + Send + Sync>),
 
     #[fail(display = "The provided arguments are not supported.")]
     InvalidConnectionArguments,
 
     #[fail(display = "The column value was different from the model")]
-    ColumnReadFailure(Error),
+    ColumnReadFailure(Box<dyn std::error::Error + Send + Sync>),
 
     #[fail(display = "Field cannot be null: {}", field)]
     FieldCannotBeNull { field: String },
@@ -72,8 +66,8 @@ pub enum ConnectorError {
     #[fail(display = "{}", _0)]
     DomainError(DomainError),
 
-    #[fail(display = "Record not found: {}", _0)]
-    RecordNotFoundForWhere(RecordFinderInfo),
+    #[fail(display = "Record not found: {:?}", _0)]
+    RecordNotFoundForWhere(Filter),
 
     #[fail(
         display = "Violating a relation {} between {} and {}",
@@ -92,9 +86,7 @@ pub enum ConnectorError {
     RecordsNotConnected {
         relation_name: String,
         parent_name: String,
-        parent_where: Option<Box<RecordFinderInfo>>,
         child_name: String,
-        child_where: Option<Box<RecordFinderInfo>>,
     },
 
     #[fail(display = "Conversion error: {}", _0)]
@@ -114,10 +106,13 @@ pub enum ConnectorError {
 
     #[fail(display = "Authentication failed for user '{}'", user)]
     AuthenticationFailed { user: String },
+
+    #[fail(display = "Database error. error code: {}, error message: {}", code, message)]
+    RawError { code: String, message: String },
 }
 
 impl From<DomainError> for ConnectorError {
     fn from(e: DomainError) -> ConnectorError {
-        ConnectorError::DomainError(e)
+        ConnectorError::from_kind(ErrorKind::DomainError(e))
     }
 }

@@ -6,10 +6,11 @@
         {
           "name": "column1",
           "tpe": {
-            "raw": "integer",
-            "family": "int"
+            "dataType": "integer",
+            "fullDataType": "int",
+            "family": "int",
+          "arity": "nullable"
           },
-          "arity": "nullable",
           "default": null,
           "autoIncrement": false
         }

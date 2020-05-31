@@ -2,9 +2,9 @@
 #![allow(unused)]
 
 use barrel::{types, Migration};
-use log::{debug, LevelFilter};
 use pretty_assertions::assert_eq;
-use prisma_query::connector::{Queryable, Sqlite as SqliteDatabaseClient};
+use prisma_value::PrismaValue;
+use quaint::connector::{Queryable, Sqlite as SqliteDatabaseClient};
 use sql_schema_describer::*;
 use std::collections::HashSet;
 use std::fs::File;
@@ -12,48 +12,13 @@ use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::{thread, time};
+use tracing::debug;
 
 const SCHEMA: &str = "DatabaseInspectorTest";
 
-static IS_SETUP: AtomicBool = AtomicBool::new(false);
-
-fn setup() {
-    let is_setup = IS_SETUP.load(Ordering::Relaxed);
-    if is_setup {
-        return;
-    }
-
-    let log_level = match std::env::var("TEST_LOG")
-        .unwrap_or("warn".to_string())
-        .to_lowercase()
-        .as_ref()
-    {
-        "trace" => LevelFilter::Trace,
-        "debug" => LevelFilter::Debug,
-        "info" => LevelFilter::Info,
-        "warn" => LevelFilter::Warn,
-        "error" => LevelFilter::Error,
-        _ => LevelFilter::Warn,
-    };
-    fern::Dispatch::new()
-        .format(|out, message, record| {
-            out.finish(format_args!("[{}][{}] {}", record.target(), record.level(), message))
-        })
-        .level(log_level)
-        .chain(std::io::stdout())
-        .apply()
-        .expect("fern configuration");
-
-    IS_SETUP.store(true, Ordering::Relaxed);
-}
-
 #[test]
 fn database_schema_is_serializable() {
-    setup();
-
-    let mut enum_values = HashSet::new();
-    enum_values.insert("option1".to_string());
-    enum_values.insert("option2".to_string());
+    let mut enum_values = vec!["option1".to_string(), "option2".to_string()];
     let schema = SqlSchema {
         tables: vec![
             Table {
@@ -62,30 +27,39 @@ fn database_schema_is_serializable() {
                     Column {
                         name: "column1".to_string(),
                         tpe: ColumnType {
-                            raw: "integer".to_string(),
+                            data_type: "integer".to_string(),
+                            full_data_type: "int".to_string(),
+                            character_maximum_length: None,
+
                             family: ColumnTypeFamily::Int,
+                            arity: ColumnArity::Required,
                         },
-                        arity: ColumnArity::Required,
                         default: None,
                         auto_increment: true,
                     },
                     Column {
                         name: "column2".to_string(),
                         tpe: ColumnType {
-                            raw: "varchar(255)".to_string(),
+                            data_type: "varchar(255)".to_string(),
+                            full_data_type: "varchar(255)".to_string(),
+                            character_maximum_length: None,
+
                             family: ColumnTypeFamily::String,
+                            arity: ColumnArity::Nullable,
                         },
-                        arity: ColumnArity::Nullable,
-                        default: Some("default value".to_string()),
+                        default: Some(DefaultValue::VALUE(PrismaValue::String("default value".to_string()))),
                         auto_increment: false,
                     },
                     Column {
                         name: "column3".to_string(),
                         tpe: ColumnType {
-                            raw: "integer".to_string(),
+                            data_type: "integer".to_string(),
+                            full_data_type: "integer".to_string(),
+                            character_maximum_length: None,
+
                             family: ColumnTypeFamily::Int,
+                            arity: ColumnArity::Required,
                         },
-                        arity: ColumnArity::Required,
                         default: None,
                         auto_increment: false,
                     },
@@ -100,6 +74,7 @@ fn database_schema_is_serializable() {
                     sequence: None,
                 }),
                 foreign_keys: vec![ForeignKey {
+                    constraint_name: None,
                     columns: vec!["column3".to_string()],
                     referenced_table: "table2".to_string(),
                     referenced_columns: vec!["id".to_string()],
@@ -111,10 +86,13 @@ fn database_schema_is_serializable() {
                 columns: vec![Column {
                     name: "id".to_string(),
                     tpe: ColumnType {
-                        raw: "integer".to_string(),
+                        data_type: "integer".to_string(),
+                        full_data_type: "integer".to_string(),
+                        character_maximum_length: None,
+
                         family: ColumnTypeFamily::Int,
+                        arity: ColumnArity::Required,
                     },
-                    arity: ColumnArity::Required,
                     default: None,
                     auto_increment: true,
                 }],
@@ -150,18 +128,19 @@ fn database_schema_is_serializable() {
 
 #[test]
 fn database_schema_without_primary_key_is_serializable() {
-    setup();
-
     let schema = SqlSchema {
         tables: vec![Table {
             name: "table1".to_string(),
             columns: vec![Column {
                 name: "column1".to_string(),
                 tpe: ColumnType {
-                    raw: "integer".to_string(),
+                    data_type: "integer".to_string(),
+                    full_data_type: "int".to_string(),
+                    character_maximum_length: None,
+
                     family: ColumnTypeFamily::Int,
+                    arity: ColumnArity::Nullable,
                 },
-                arity: ColumnArity::Nullable,
                 default: None,
                 auto_increment: false,
             }],
@@ -186,8 +165,6 @@ fn database_schema_without_primary_key_is_serializable() {
 
 #[test]
 fn database_schema_is_serializable_for_every_column_type_family() {
-    setup();
-
     // Add a column of every column type family
     let mut columns: Vec<Column> = vec![
         ColumnTypeFamily::Int,
@@ -208,10 +185,13 @@ fn database_schema_is_serializable_for_every_column_type_family() {
     .map(|(i, family)| Column {
         name: format!("column{}", i + 1),
         tpe: ColumnType {
-            raw: "raw type".to_string(),
+            data_type: "raw type".to_string(),
+            full_data_type: "full raw type".to_string(),
+            character_maximum_length: None,
+
             family: family.to_owned(),
+            arity: ColumnArity::Nullable,
         },
-        arity: ColumnArity::Nullable,
         default: None,
         auto_increment: false,
     })
@@ -241,8 +221,6 @@ fn database_schema_is_serializable_for_every_column_type_family() {
 
 #[test]
 fn database_schema_is_serializable_for_every_column_arity() {
-    setup();
-
     // Add a column of every arity
     let mut columns: Vec<Column> = vec![ColumnArity::Required, ColumnArity::Nullable, ColumnArity::List]
         .iter()
@@ -250,10 +228,13 @@ fn database_schema_is_serializable_for_every_column_arity() {
         .map(|(i, arity)| Column {
             name: format!("column{}", i + 1),
             tpe: ColumnType {
-                raw: "int".to_string(),
+                data_type: "integer".to_string(),
+                full_data_type: "int".to_string(),
+                character_maximum_length: None,
+
                 family: ColumnTypeFamily::Int,
+                arity: arity.to_owned(),
             },
-            arity: arity.to_owned(),
             default: None,
             auto_increment: false,
         })
@@ -283,8 +264,6 @@ fn database_schema_is_serializable_for_every_column_arity() {
 
 #[test]
 fn database_schema_is_serializable_for_every_foreign_key_action() {
-    setup();
-
     // Add a foreign key of every possible action
     let schema = SqlSchema {
         tables: vec![Table {
@@ -293,50 +272,65 @@ fn database_schema_is_serializable_for_every_foreign_key_action() {
                 Column {
                     name: "column1".to_string(),
                     tpe: ColumnType {
-                        raw: "int".to_string(),
+                        data_type: "integer".to_string(),
+                        full_data_type: "int".to_string(),
+                        character_maximum_length: None,
+
                         family: ColumnTypeFamily::Int,
+                        arity: ColumnArity::Nullable,
                     },
-                    arity: ColumnArity::Nullable,
                     auto_increment: false,
                     default: None,
                 },
                 Column {
                     name: "column2".to_string(),
                     tpe: ColumnType {
-                        raw: "int".to_string(),
+                        data_type: "integer".to_string(),
+                        full_data_type: "int".to_string(),
+                        character_maximum_length: None,
+
                         family: ColumnTypeFamily::Int,
+                        arity: ColumnArity::Nullable,
                     },
-                    arity: ColumnArity::Nullable,
                     auto_increment: false,
                     default: None,
                 },
                 Column {
                     name: "column3".to_string(),
                     tpe: ColumnType {
-                        raw: "int".to_string(),
+                        data_type: "integer".to_string(),
+                        full_data_type: "int".to_string(),
+                        character_maximum_length: None,
+
                         family: ColumnTypeFamily::Int,
+                        arity: ColumnArity::Nullable,
                     },
-                    arity: ColumnArity::Nullable,
                     auto_increment: false,
                     default: None,
                 },
                 Column {
                     name: "column4".to_string(),
                     tpe: ColumnType {
-                        raw: "int".to_string(),
+                        data_type: "integer".to_string(),
+                        full_data_type: "int".to_string(),
+                        character_maximum_length: None,
+
                         family: ColumnTypeFamily::Int,
+                        arity: ColumnArity::Nullable,
                     },
-                    arity: ColumnArity::Nullable,
                     auto_increment: false,
                     default: None,
                 },
                 Column {
                     name: "column5".to_string(),
                     tpe: ColumnType {
-                        raw: "int".to_string(),
+                        data_type: "integer".to_string(),
+                        full_data_type: "int".to_string(),
+                        character_maximum_length: None,
+
                         family: ColumnTypeFamily::Int,
+                        arity: ColumnArity::Nullable,
                     },
-                    arity: ColumnArity::Nullable,
                     auto_increment: false,
                     default: None,
                 },
@@ -345,30 +339,35 @@ fn database_schema_is_serializable_for_every_foreign_key_action() {
             primary_key: None,
             foreign_keys: vec![
                 ForeignKey {
+                    constraint_name: None,
                     columns: vec!["column1".to_string()],
                     referenced_table: "table2".to_string(),
                     referenced_columns: vec!["id".to_string()],
                     on_delete_action: ForeignKeyAction::NoAction,
                 },
                 ForeignKey {
+                    constraint_name: None,
                     columns: vec!["column2".to_string()],
                     referenced_table: "table2".to_string(),
                     referenced_columns: vec!["id".to_string()],
                     on_delete_action: ForeignKeyAction::Restrict,
                 },
                 ForeignKey {
+                    constraint_name: None,
                     columns: vec!["column3".to_string()],
                     referenced_table: "table2".to_string(),
                     referenced_columns: vec!["id".to_string()],
                     on_delete_action: ForeignKeyAction::Cascade,
                 },
                 ForeignKey {
+                    constraint_name: None,
                     columns: vec!["column4".to_string()],
                     referenced_table: "table2".to_string(),
                     referenced_columns: vec!["id".to_string()],
                     on_delete_action: ForeignKeyAction::SetNull,
                 },
                 ForeignKey {
+                    constraint_name: None,
                     columns: vec!["column5".to_string()],
                     referenced_table: "table2".to_string(),
                     referenced_columns: vec!["id".to_string()],

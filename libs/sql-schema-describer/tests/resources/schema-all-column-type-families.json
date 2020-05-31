@@ -6,120 +6,132 @@
         {
           "name": "column1",
           "tpe": {
-            "raw": "raw type",
-            "family": "int"
+            "dataType": "raw type",
+            "fullDataType": "full raw type",
+            "family": "int",
+          "arity": "nullable"
           },
-          "arity": "nullable",
           "default": null,
           "autoIncrement": false
         },
         {
           "name": "column2",
           "tpe": {
-            "raw": "raw type",
-            "family": "float"
+            "dataType": "raw type",
+            "fullDataType": "full raw type",
+            "family": "float",
+          "arity": "nullable"
           },
-          "arity": "nullable",
           "default": null,
           "autoIncrement": false
         },
         {
           "name": "column3",
           "tpe": {
-            "raw": "raw type",
-            "family": "boolean"
+            "dataType": "raw type",
+            "fullDataType": "full raw type",
+            "family": "boolean",
+          "arity": "nullable"
           },
-          "arity": "nullable",
           "default": null,
           "autoIncrement": false
         },
         {
           "name": "column4",
           "tpe": {
-            "raw": "raw type",
-            "family": "string"
+            "dataType": "raw type",
+            "fullDataType": "full raw type",
+            "family": "string",
+          "arity": "nullable"
           },
-          "arity": "nullable",
           "default": null,
           "autoIncrement": false
         },
         {
           "name": "column5",
           "tpe": {
-            "raw": "raw type",
-            "family": "dateTime"
+            "dataType": "raw type",
+            "fullDataType": "full raw type",
+            "family": "dateTime",
+          "arity": "nullable"
           },
-          "arity": "nullable",
           "default": null,
           "autoIncrement": false
         },
         {
           "name": "column6",
           "tpe": {
-            "raw": "raw type",
-            "family": "binary"
+            "dataType": "raw type",
+            "fullDataType": "full raw type",
+            "family": "binary",
+          "arity": "nullable"
           },
-          "arity": "nullable",
           "default": null,
           "autoIncrement": false
         },
         {
           "name": "column7",
           "tpe": {
-            "raw": "raw type",
-            "family": "json"
+            "dataType": "raw type",
+            "fullDataType": "full raw type",
+            "family": "json",
+          "arity": "nullable"
           },
-          "arity": "nullable",
           "default": null,
           "autoIncrement": false
         },
         {
           "name": "column8",
           "tpe": {
-            "raw": "raw type",
-            "family": "uuid"
+            "dataType": "raw type",
+            "fullDataType": "full raw type",
+            "family": "uuid",
+          "arity": "nullable"
           },
-          "arity": "nullable",
           "default": null,
           "autoIncrement": false
         },
         {
           "name": "column9",
           "tpe": {
-            "raw": "raw type",
-            "family": "geometric"
+            "dataType": "raw type",
+            "fullDataType": "full raw type",
+            "family": "geometric",
+          "arity": "nullable"
           },
-          "arity": "nullable",
           "default": null,
           "autoIncrement": false
         },
         {
           "name": "column10",
           "tpe": {
-            "raw": "raw type",
-            "family": "logSequenceNumber"
+            "dataType": "raw type",
+            "fullDataType": "full raw type",
+            "family": "logSequenceNumber",
+          "arity": "nullable"
           },
-          "arity": "nullable",
           "default": null,
           "autoIncrement": false
         },
         {
           "name": "column11",
           "tpe": {
-            "raw": "raw type",
-            "family": "textSearch"
+            "dataType": "raw type",
+            "fullDataType": "full raw type",
+            "family": "textSearch",
+          "arity": "nullable"
           },
-          "arity": "nullable",
           "default": null,
           "autoIncrement": false
         },
         {
           "name": "column12",
           "tpe": {
-            "raw": "raw type",
-            "family": "transactionId"
+            "dataType": "raw type",
+            "fullDataType": "full raw type",
+            "family": "transactionId",
+          "arity": "nullable"
           },
-          "arity": "nullable",
           "default": null,
           "autoIncrement": false
         }

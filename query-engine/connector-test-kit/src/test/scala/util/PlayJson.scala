@@ -82,6 +82,15 @@ trait PlayJsonExtensions extends JsonUtils {
     def getFirstErrorCode = jsValue.pathAsSeq("errors").head.pathAsLong("code")
 
     def getFirstFunctionErrorMessage = jsValue.pathAsSeq("errors").head.pathAsString("functionError")
+
+    def identifierAtPath(path: String, subPath: String = "", list: Boolean): String = {
+      (subPath, list) match {
+        case ("", false) => s"""${pathAsJsObject(path)}"""
+        case (x, false)  => s""""${pathAsString(path + x)}""""
+        case ("", true)  => s"""${pathAsSeq(path).head.toString()}"""
+        case (x, true)   => s""""${pathAsSeq(path).head.pathAsString(x)}""""
+      }
+    }
   }
 
   implicit class PlayJsonAssertionsExtension(json: JsValue) {
@@ -99,7 +108,7 @@ trait PlayJsonExtensions extends JsonUtils {
       }
     }
 
-    def assertFailingResponse(errorCode: Int, errorCount: Int, errorContains: String): Unit = {
+    def assertFailingResponse(errorCode: Int, errorCount: Int, errorContains: String, errorMetaContains: Array[(String, String)]): Unit = {
       require(
         requirement = hasErrors,
         message = s"The query had to result in an error but it returned no errors. Here's the response: \n $json"
@@ -109,13 +118,26 @@ trait PlayJsonExtensions extends JsonUtils {
       val errors = json.pathAsSeq("errors")
       require(requirement = errors.size == errorCount, message = s"expected exactly $errorCount errors, but got ${errors.size} instead.")
 
+
       if (errorCode != 0) {
-        val errorCodeInResult = errors.head.pathAsLong("code")
+        val errorCodeInResult = errors.head.pathAsString("user_facing_error.error_code").stripPrefix("P")
         require(
-          requirement = errorCodeInResult == errorCode,
+          requirement = errorCodeInResult.toInt == errorCode,
           message = s"Expected the error code $errorCode, but got $errorCodeInResult. Here's the response: \n $json"
         )
       }
+
+      errorMetaContains.foreach({case (path, expectedJsonString) =>  {
+        val expectedJson = Json.parse(expectedJsonString)
+        val foundValue = errors.head.pathAsJsValue(s"user_facing_error.meta.$path")
+
+        require(
+          requirement = expectedJson == foundValue,
+          message = s"Expected the error metadata to be `$expectedJson` but found `${foundValue}`"
+
+        )
+      }
+      })
 
       if (errorContains != "") {
         require(

@@ -1,42 +1,44 @@
 //! Database description.
-use failure::Fail;
-use prisma_query::ast::ParameterizedValue;
+
+use once_cell::sync::Lazy;
+use prisma_value::PrismaValue;
+use regex::Regex;
+use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
-use std::fmt;
+use std::{fmt, str::FromStr};
+use thiserror::Error;
+use tracing::debug;
 
 pub mod mysql;
 pub mod postgres;
 pub mod sqlite;
 
 /// description errors.
-#[derive(Debug, Fail)]
+#[derive(Debug, Error)]
 pub enum SqlSchemaDescriberError {
     /// An unknown error occurred.
-    #[fail(display = "unknown")]
+    #[error("unknown")]
     UnknownError,
 }
 
 /// The result type.
 pub type SqlSchemaDescriberResult<T> = core::result::Result<T, SqlSchemaDescriberError>;
 
-/// Connection abstraction for the description backends.
-pub trait SqlConnection: Send + Sync + 'static {
-    /// Make raw SQL query.
-    fn query_raw(
-        &self,
-        sql: &str,
-        schema: &str,
-        params: &[ParameterizedValue],
-    ) -> prisma_query::Result<prisma_query::connector::ResultSet>;
-}
-
 /// A database description connector.
+#[async_trait::async_trait]
 pub trait SqlSchemaDescriberBackend: Send + Sync + 'static {
     /// List the database's schemas.
-    fn list_databases(&self) -> SqlSchemaDescriberResult<Vec<String>>;
+    async fn list_databases(&self) -> SqlSchemaDescriberResult<Vec<String>>;
+    /// Get the databases metadata.
+    async fn get_metadata(&self, schema: &str) -> SqlSchemaDescriberResult<SQLMetadata>;
     /// Describe a database schema.
-    fn describe(&self, schema: &str) -> SqlSchemaDescriberResult<SqlSchema>;
+    async fn describe(&self, schema: &str) -> SqlSchemaDescriberResult<SqlSchema>;
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct SQLMetadata {
+    pub table_count: usize,
+    pub size_in_bytes: usize,
 }
 
 /// The result of describing a database schema.
@@ -145,10 +147,12 @@ impl Table {
         }
     }
 
-    pub fn is_column_unique(&self, column: &Column) -> bool {
-        self.indices
-            .iter()
-            .any(|index| index.tpe == IndexType::Unique && index.columns.contains(&column.name))
+    pub fn is_column_unique(&self, column_name: &str) -> bool {
+        self.indices.iter().any(|index| {
+            index.tpe == IndexType::Unique
+                && index.columns.len() == 1
+                && index.columns.contains(&column_name.to_owned())
+        })
     }
 }
 /// The type of an index.
@@ -159,6 +163,15 @@ pub enum IndexType {
     Unique,
     /// Normal type.
     Normal,
+}
+
+impl IndexType {
+    pub fn is_unique(&self) -> bool {
+        match self {
+            IndexType::Unique => true,
+            _ => false,
+        }
+    }
 }
 
 /// An index of a table.
@@ -173,6 +186,12 @@ pub struct Index {
     pub tpe: IndexType,
 }
 
+impl Index {
+    pub fn is_unique(&self) -> bool {
+        self.tpe == IndexType::Unique
+    }
+}
+
 /// The primary key of a table.
 #[derive(PartialEq, Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -184,8 +203,8 @@ pub struct PrimaryKey {
 }
 
 impl PrimaryKey {
-    pub fn contains_column(&self, column: &String) -> bool {
-        self.columns.contains(column)
+    pub fn is_single_primary_key(&self, column: &String) -> bool {
+        self.columns.len() == 1 && self.columns.contains(column)
     }
 }
 
@@ -197,30 +216,15 @@ pub struct Column {
     pub name: String,
     /// Column type.
     pub tpe: ColumnType,
-    /// Column arity.
-    pub arity: ColumnArity,
     /// Column default.
-    // Does this field need to be richer? E.g. to easier detect the usages of sequences here
-    pub default: Option<String>,
+    pub default: Option<DefaultValue>,
     /// Is the column auto-incrementing?
     pub auto_increment: bool,
 }
 
 impl Column {
     pub fn is_required(&self) -> bool {
-        self.arity == ColumnArity::Required
-    }
-
-    pub fn differs_in_something_except_default(&self, other: &Column) -> bool {
-        let result = self.name != other.name
-            || self.tpe.family != other.tpe.family // TODO: must respect full type
-            || self.arity != other.arity;
-        //|| self.auto_increment != other.auto_increment;
-
-        //        if result {
-        //            println!("differs_in_something_except_default \n {:?} \n {:?}", &self, &other);
-        //        }
-        result
+        self.tpe.arity == ColumnArity::Required
     }
 }
 
@@ -228,17 +232,26 @@ impl Column {
 #[derive(PartialEq, Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ColumnType {
-    /// The raw SQL type.
-    pub raw: String,
+    /// The SQL data type.
+    pub data_type: String,
+    /// The full SQL data type.
+    pub full_data_type: String,
+    /// The maximum length for character or string bit types if specified.
+    pub character_maximum_length: Option<i64>,
     /// The family of the raw type.
     pub family: ColumnTypeFamily,
+    /// The arity of the column.
+    pub arity: ColumnArity,
 }
 
 impl ColumnType {
-    pub fn pure(family: ColumnTypeFamily) -> ColumnType {
+    pub fn pure(family: ColumnTypeFamily, arity: ColumnArity) -> Self {
         ColumnType {
-            raw: "".to_string(),
+            data_type: "".to_string(),
+            full_data_type: "".to_string(),
+            character_maximum_length: None,
             family,
+            arity,
         }
     }
 }
@@ -272,23 +285,29 @@ pub enum ColumnTypeFamily {
     TextSearch,
     /// Transaction ID types.
     TransactionId,
+    ///Enum
+    Enum(String),
+    /// Unsupported
+    Unsupported(String),
 }
 
 impl fmt::Display for ColumnTypeFamily {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let str = match self {
-            Self::Int => "int",
-            Self::Float => "float",
-            Self::Boolean => "boolean",
-            Self::String => "string",
-            Self::DateTime => "dateTime",
-            Self::Binary => "binary",
-            Self::Json => "json",
-            Self::Uuid => "uuid",
-            Self::Geometric => "geometric",
-            Self::LogSequenceNumber => "logSequenceNumber",
-            Self::TextSearch => "textSearch",
-            Self::TransactionId => "transactionId",
+            Self::Int => "int".to_string(),
+            Self::Float => "float".to_string(),
+            Self::Boolean => "boolean".to_string(),
+            Self::String => "string".to_string(),
+            Self::DateTime => "dateTime".to_string(),
+            Self::Binary => "binary".to_string(),
+            Self::Json => "json".to_string(),
+            Self::Uuid => "uuid".to_string(),
+            Self::Geometric => "geometric".to_string(),
+            Self::LogSequenceNumber => "logSequenceNumber".to_string(),
+            Self::TextSearch => "textSearch".to_string(),
+            Self::TransactionId => "transactionId".to_string(),
+            Self::Enum(x) => format!("Enum({})", &x),
+            Self::Unsupported(x) => x.to_string(),
         };
         write!(f, "{}", str)
     }
@@ -304,6 +323,16 @@ pub enum ColumnArity {
     Nullable,
     /// List type column.
     List,
+}
+
+impl ColumnArity {
+    pub fn is_required(&self) -> bool {
+        matches!(self, ColumnArity::Required)
+    }
+
+    pub fn is_nullable(&self) -> bool {
+        matches!(self, ColumnArity::Nullable)
+    }
 }
 
 /// Foreign key action types (for ON DELETE|ON UPDATE).
@@ -329,9 +358,11 @@ pub enum ForeignKeyAction {
 }
 
 /// A foreign key.
-#[derive(PartialEq, Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ForeignKey {
+    /// The database name of the foreign key constraint, when available.
+    pub constraint_name: Option<String>,
     /// Column names.
     pub columns: Vec<String>,
     /// Referenced table.
@@ -342,6 +373,14 @@ pub struct ForeignKey {
     pub on_delete_action: ForeignKeyAction,
 }
 
+impl PartialEq for ForeignKey {
+    fn eq(&self, other: &Self) -> bool {
+        self.columns == other.columns
+            && self.referenced_table == other.referenced_table
+            && self.referenced_columns == other.referenced_columns
+    }
+}
+
 /// A SQL enum.
 #[derive(PartialEq, Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -349,7 +388,7 @@ pub struct Enum {
     /// Enum name.
     pub name: String,
     /// Possible enum values.
-    pub values: HashSet<String>,
+    pub values: Vec<String>,
 }
 
 /// A SQL sequence.
@@ -362,4 +401,92 @@ pub struct Sequence {
     pub initial_value: u32,
     /// Sequence allocation size.
     pub allocation_size: u32,
+}
+
+/// A DefaultValue
+#[derive(PartialEq, Debug, Clone, Serialize, Deserialize)]
+pub enum DefaultValue {
+    /// A constant value, parsed as String
+    VALUE(PrismaValue),
+    /// An expression generating a current timestamp.
+    NOW,
+    /// An expression generating a sequence.
+    SEQUENCE(String),
+    /// An unrecognized Default Value
+    DBGENERATED(String),
+}
+
+impl DefaultValue {
+    pub fn as_value(&self) -> Option<&PrismaValue> {
+        match self {
+            DefaultValue::VALUE(v) => Some(v),
+            _ => None,
+        }
+    }
+}
+
+static RE_NUM: Lazy<Regex> = Lazy::new(|| Regex::new(r"^'?(\d+)'?$").expect("compile regex"));
+static RE_FLOAT: Lazy<Regex> = Lazy::new(|| Regex::new(r"^'?([^']+)'?$").expect("compile regex"));
+
+pub fn parse_int(value: &str) -> Option<PrismaValue> {
+    let rslt = RE_NUM.captures(value);
+    if rslt.is_none() {
+        return None;
+    }
+
+    let captures = rslt.expect("get captures");
+    let num_str = captures.get(1).expect("get capture").as_str();
+    let num_rslt = num_str.parse::<i64>();
+    match num_rslt {
+        Ok(num) => Some(PrismaValue::Int(num)),
+        Err(_) => None,
+    }
+}
+
+pub fn parse_bool(value: &str) -> Option<PrismaValue> {
+    match value.to_lowercase().parse() {
+        Ok(val) => Some(PrismaValue::Boolean(val)),
+        Err(_) => None,
+    }
+}
+
+pub fn parse_float(value: &str) -> Option<PrismaValue> {
+    let rslt = RE_FLOAT.captures(value);
+    if rslt.is_none() {
+        return None;
+    }
+
+    let captures = rslt.expect("get captures");
+    let num_str = captures.get(1).expect("get capture").as_str();
+    match Decimal::from_str(num_str) {
+        Ok(num) => Some(PrismaValue::Float(num)),
+        Err(_) => {
+            debug!("Couldn't parse float '{}'", value);
+            None
+        }
+    }
+}
+
+pub fn unquote_string(val: String) -> String {
+    val.trim_start_matches('\'')
+        .trim_end_matches('\'')
+        .trim_start_matches('\\')
+        .trim_start_matches('"')
+        .trim_end_matches('"')
+        .trim_end_matches('\\')
+        .into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unquoting_works() {
+        let quoted_str = "'abc $$ def'".to_string();
+
+        assert_eq!(unquote_string(quoted_str), "abc $$ def");
+
+        assert_eq!(unquote_string("heh ".into()), "heh ");
+    }
 }

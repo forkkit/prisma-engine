@@ -1,42 +1,41 @@
 use super::MigrationStepsResultOutput;
 use crate::commands::command::*;
 use crate::migration_engine::MigrationEngine;
-use datamodel::Datamodel;
+use datamodel::{ast::SchemaAst, Datamodel};
 use migration_connector::*;
+use serde::Deserialize;
 
 pub struct ApplyMigrationCommand<'a> {
     input: &'a ApplyMigrationInput,
 }
 
-impl<'a> MigrationCommand<'a> for ApplyMigrationCommand<'a> {
+#[async_trait::async_trait]
+impl<'a> MigrationCommand for ApplyMigrationCommand<'a> {
     type Input = ApplyMigrationInput;
     type Output = MigrationStepsResultOutput;
 
-    fn new(input: &'a Self::Input) -> Box<Self> {
-        Box::new(ApplyMigrationCommand { input })
-    }
-
-    fn execute<C, D>(&self, engine: &MigrationEngine<C, D>) -> CommandResult<Self::Output>
+    async fn execute<C, D>(input: &Self::Input, engine: &MigrationEngine<C, D>) -> CommandResult<Self::Output>
     where
         C: MigrationConnector<DatabaseMigration = D>,
         D: DatabaseMigrationMarker + Send + Sync + 'static,
     {
-        debug!("{:?}", self.input);
+        let cmd = ApplyMigrationCommand { input };
+        tracing::debug!("{:?}", cmd.input);
 
         let connector = engine.connector();
         let migration_persistence = connector.migration_persistence();
 
-        match migration_persistence.last() {
-            Some(ref last_migration) if last_migration.is_watch_migration() && !self.input.is_watch_migration() => {
-                self.handle_transition_out_of_watch_mode(&engine)
+        match migration_persistence.last().await? {
+            Some(ref last_migration) if last_migration.is_watch_migration() && !cmd.input.is_watch_migration() => {
+                cmd.handle_transition_out_of_watch_mode(&engine).await
             }
-            _ => self.handle_normal_migration(&engine),
+            _ => cmd.handle_normal_migration(&engine).await,
         }
     }
 }
 
 impl<'a> ApplyMigrationCommand<'a> {
-    fn handle_transition_out_of_watch_mode<C, D>(
+    async fn handle_transition_out_of_watch_mode<C, D>(
         &self,
         engine: &MigrationEngine<C, D>,
     ) -> CommandResult<MigrationStepsResultOutput>
@@ -47,87 +46,135 @@ impl<'a> ApplyMigrationCommand<'a> {
         let connector = engine.connector();
         let migration_persistence = connector.migration_persistence();
 
-        let current_datamodel = migration_persistence.current_datamodel();
-        let last_non_watch_datamodel = migration_persistence.last_non_watch_datamodel();
-        let next_datamodel = engine
-            .datamodel_calculator()
-            .infer(&last_non_watch_datamodel, &self.input.steps);
+        let last_migration = migration_persistence.last().await?;
+        let current_datamodel = last_migration
+            .map(|migration| migration.parse_datamodel())
+            .unwrap_or_else(|| Ok(Datamodel::empty()))
+            .map_err(|(err, schema)| CommandError::InvalidPersistedDatamodel(err, schema))?;
 
-        self.handle_migration(&engine, current_datamodel, next_datamodel)
+        let last_non_watch_datamodel = migration_persistence
+            .last_non_watch_migration()
+            .await?
+            .map(|m| m.parse_schema_ast())
+            .unwrap_or_else(|| Ok(SchemaAst::empty()))
+            .map_err(|(err, schema)| CommandError::InvalidPersistedDatamodel(err, schema))?;
+        let next_datamodel_ast = engine
+            .datamodel_calculator()
+            .infer(&last_non_watch_datamodel, self.input.steps.as_slice())?;
+
+        self.handle_migration(&engine, current_datamodel, next_datamodel_ast)
+            .await
     }
 
-    fn handle_normal_migration<C, D>(&self, engine: &MigrationEngine<C, D>) -> CommandResult<MigrationStepsResultOutput>
+    async fn handle_normal_migration<C, D>(
+        &self,
+        engine: &MigrationEngine<C, D>,
+    ) -> CommandResult<MigrationStepsResultOutput>
     where
         C: MigrationConnector<DatabaseMigration = D>,
         D: DatabaseMigrationMarker + Send + Sync + 'static,
     {
         let connector = engine.connector();
         let migration_persistence = connector.migration_persistence();
-        let current_datamodel = migration_persistence.current_datamodel();
 
-        let next_datamodel = engine
+        if migration_persistence
+            .migration_is_already_applied(&self.input.migration_id)
+            .await?
+        {
+            return Err(CommandError::Input(anyhow::anyhow!(
+                "Invariant violation: the migration with id `{migration_id}` has already been applied.",
+                migration_id = self.input.migration_id
+            )));
+        }
+
+        let last_migration = migration_persistence.last().await?;
+        let current_datamodel_ast = last_migration
+            .as_ref()
+            .map(|migration| migration.parse_schema_ast())
+            .unwrap_or_else(|| Ok(SchemaAst::empty()))
+            .map_err(|(err, schema)| CommandError::InvalidPersistedDatamodel(err, schema))?;
+        let current_datamodel = last_migration
+            .map(|migration| migration.parse_datamodel())
+            .unwrap_or_else(|| Ok(Datamodel::empty()))
+            .map_err(|(err, schema)| CommandError::InvalidPersistedDatamodel(err, schema))?;
+
+        let next_datamodel_ast = engine
             .datamodel_calculator()
-            .infer(&current_datamodel, &self.input.steps);
+            .infer(&current_datamodel_ast, self.input.steps.as_slice())?;
 
-        self.handle_migration(&engine, current_datamodel, next_datamodel)
+        self.handle_migration(&engine, current_datamodel, next_datamodel_ast)
+            .await
     }
 
-    fn handle_migration<C, D>(
+    async fn handle_migration<C, D>(
         &self,
         engine: &MigrationEngine<C, D>,
         current_datamodel: Datamodel,
-        next_datamodel: Datamodel,
+        next_schema_ast: SchemaAst,
     ) -> CommandResult<MigrationStepsResultOutput>
     where
         C: MigrationConnector<DatabaseMigration = D>,
         D: DatabaseMigrationMarker + Send + Sync + 'static,
     {
         let connector = engine.connector();
+        let next_datamodel = datamodel::lift_ast(&next_schema_ast).map_err(CommandError::ProducedBadDatamodel)?;
         let migration_persistence = connector.migration_persistence();
 
-        let database_migration =
-            connector
-                .database_migration_inferrer()
-                .infer(&current_datamodel, &next_datamodel, &self.input.steps)?; // TODO: those steps are a lie right now. Does not matter because we don't use them at the moment.
+        let database_migration = connector
+            .database_migration_inferrer()
+            .infer(&current_datamodel, &next_datamodel, &self.input.steps)
+            .await?;
 
         let database_steps_json_pretty = connector
             .database_migration_step_applier()
             .render_steps_pretty(&database_migration)?;
+
+        tracing::trace!(?database_steps_json_pretty);
 
         let database_migration_json = database_migration.serialize();
 
         let mut migration = Migration::new(self.input.migration_id.clone());
         migration.datamodel_steps = self.input.steps.clone();
         migration.database_migration = database_migration_json;
-        migration.datamodel = next_datamodel.clone();
+        migration.datamodel_string =
+            datamodel::render_schema_ast_to_string(&next_schema_ast).map_err(CommandError::ProducedBadDatamodel)?;
 
-        let diagnostics = connector.destructive_changes_checker().check(&database_migration)?;
+        let diagnostics = connector
+            .destructive_changes_checker()
+            .check(&database_migration)
+            .await?;
 
-        // We always force the migrations for now to preserve backwards-compatibility (i.e. never
-        // cancelling migrations). Once the lift CLI is ready, the `force` option will default to
-        // `false`.
-        match (diagnostics.has_warnings(), self.input.force.unwrap_or(true)) {
+        match (diagnostics.has_warnings(), self.input.force.unwrap_or(false)) {
             // We have no warnings, or the force flag is passed.
             (false, _) | (true, true) => {
-                let saved_migration = migration_persistence.create(migration);
+                tracing::debug!("Applying the migration");
+                let saved_migration = migration_persistence.create(migration).await?;
 
                 connector
                     .migration_applier()
-                    .apply(&saved_migration, &database_migration)?;
+                    .apply(&saved_migration, &database_migration)
+                    .await?;
+
+                tracing::debug!("Migration applied");
             }
             // We have warnings, but no force flag was passed.
-            (true, false) => (),
+            (true, false) => tracing::info!("The force flag was not passed, the migration will not be applied."),
         }
 
-        let DestructiveChangeDiagnostics { warnings, errors } = diagnostics;
+        let DestructiveChangeDiagnostics {
+            warnings,
+            errors,
+            unexecutable_migrations,
+        } = diagnostics;
 
         Ok(MigrationStepsResultOutput {
-            datamodel: datamodel::render(&next_datamodel).unwrap(),
+            datamodel: datamodel::render_datamodel_to_string(&next_datamodel).unwrap(),
             datamodel_steps: self.input.steps.clone(),
-            database_steps: database_steps_json_pretty,
+            database_steps: serde_json::Value::Array(database_steps_json_pretty),
             errors,
             warnings,
             general_errors: Vec::new(),
+            unexecutable_migrations,
         })
     }
 }

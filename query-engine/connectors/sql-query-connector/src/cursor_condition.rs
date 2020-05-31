@@ -1,82 +1,62 @@
 use connector_interface::QueryArguments;
-use prisma_models::prelude::*;
-use prisma_query::ast::*;
-use std::sync::Arc;
+use prisma_models::*;
+use quaint::ast::*;
 
-#[derive(Clone, Copy)]
-enum CursorType {
-    Before,
-    After,
-}
+pub fn build(query_arguments: &QueryArguments, model: ModelRef) -> ConditionTree<'static> {
+    match (query_arguments.cursor.as_ref(), query_arguments.order_by.as_ref()) {
+        (None, _) => ConditionTree::NoCondition,
+        (Some(cursor), order_by) => {
+            // If there's a sort order defined for the cursor, take that one, else implicitly order by ID.
+            let (comparison_fields, sort_order) = match order_by {
+                Some(x) => (vec![x.field.clone()], x.sort_order),
+                None => (
+                    model.primary_identifier().scalar_fields().collect(),
+                    SortOrder::Ascending,
+                ),
+            };
 
-pub struct CursorCondition;
+            let columns: Vec<_> = comparison_fields.as_columns().collect();
+            let order_row = Row::from(columns.clone());
+            let fields: Vec<_> = cursor.fields().collect();
+            let values: Vec<_> = cursor.values().collect();
 
-impl CursorCondition {
-    pub fn build(query_arguments: &QueryArguments, model: ModelRef) -> ConditionTree<'static> {
-        match (
-            query_arguments.before.as_ref(),
-            query_arguments.after.as_ref(),
-            query_arguments.order_by.as_ref(),
-        ) {
-            (None, None, _) => ConditionTree::NoCondition,
-            (before, after, order_by) => {
-                let field = match order_by {
-                    Some(order) => Arc::clone(&order.field),
-                    None => model.fields().id(),
-                };
+            let cursor_columns: Vec<_> = fields.as_slice().as_columns().collect();
+            let cursor_row = Row::from(cursor_columns);
 
-                let sort_order: SortOrder = order_by.map(|order| order.sort_order).unwrap_or(SortOrder::Ascending);
+            let where_condition = cursor_row.clone().equals(values.clone());
 
-                let cursor_for = |cursor_type: CursorType, id: GraphqlId| {
-                    let model_id = model.fields().id();
-                    let where_condition = model_id.as_column().equals(id.clone());
+            let select_query = Select::from_table(model.as_table())
+                .columns(columns.clone())
+                .so_that(where_condition);
 
-                    let select_query = Select::from_table(model.table())
-                        .column(field.as_column())
-                        .so_that(ConditionTree::single(where_condition));
+            // A negative `take` value signifies that values should be taken before the cursor, requiring a different ordering.
+            let compare = match (query_arguments.take, sort_order) {
+                (Some(t), SortOrder::Ascending) if t < 0 => order_row
+                    .clone()
+                    .equals(select_query.clone())
+                    .and(cursor_row.clone().less_than_or_equals(values))
+                    .or(order_row.less_than_or_equals(select_query)),
 
-                    let compare = match (cursor_type, sort_order) {
-                        (CursorType::Before, SortOrder::Ascending) => field
-                            .as_column()
-                            .equals(select_query.clone())
-                            .and(model_id.as_column().less_than(id))
-                            .or(field.as_column().less_than(select_query)),
-                        (CursorType::Before, SortOrder::Descending) => field
-                            .as_column()
-                            .equals(select_query.clone())
-                            .and(model_id.as_column().less_than(id))
-                            .or(field.as_column().greater_than(select_query)),
-                        (CursorType::After, SortOrder::Ascending) => field
-                            .as_column()
-                            .equals(select_query.clone())
-                            .and(model_id.as_column().greater_than(id))
-                            .or(field.as_column().greater_than(select_query)),
-                        (CursorType::After, SortOrder::Descending) => field
-                            .as_column()
-                            .equals(select_query.clone())
-                            .and(model_id.as_column().greater_than(id))
-                            .or(field.as_column().less_than(select_query)),
-                    };
+                (Some(t), SortOrder::Descending) if t < 0 => order_row
+                    .clone()
+                    .equals(select_query.clone())
+                    .and(cursor_row.clone().less_than_or_equals(values))
+                    .or(order_row.greater_than_or_equals(select_query)),
 
-                    ConditionTree::single(compare)
-                };
+                (_, SortOrder::Ascending) => order_row
+                    .clone()
+                    .equals(select_query.clone())
+                    .and(cursor_row.clone().greater_than_or_equals(values))
+                    .or(order_row.greater_than_or_equals(select_query)),
 
-                let after_cursor = after
-                    .map(|id| {
-                        let id_val = id.clone();
-                        cursor_for(CursorType::After, id_val)
-                    })
-                    .unwrap_or(ConditionTree::NoCondition);
+                (_, SortOrder::Descending) => order_row
+                    .clone()
+                    .equals(select_query.clone())
+                    .and(cursor_row.clone().greater_than_or_equals(values))
+                    .or(order_row.less_than_or_equals(select_query)),
+            };
 
-                let before_cursor = before
-                    .map(|id| {
-                        let id_val = id.clone();
-                        cursor_for(CursorType::Before, id_val)
-                    })
-                    .unwrap_or(ConditionTree::NoCondition);
-
-                ConditionTree::and(after_cursor, before_cursor)
-            }
+            ConditionTree::single(compare)
         }
     }
 }

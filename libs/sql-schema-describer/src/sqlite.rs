@@ -1,27 +1,55 @@
 //! SQLite description.
 use super::*;
-use crate::SqlConnection;
-use log::debug;
-use prisma_query::ast::ParameterizedValue;
-use std::collections::HashMap;
-use std::sync::Arc;
+use quaint::{ast::Value, prelude::Queryable};
+use std::{borrow::Cow, collections::HashMap, convert::TryInto, sync::Arc};
+use tracing::debug;
 
 pub struct SqlSchemaDescriber {
-    conn: Arc<dyn SqlConnection>,
+    conn: Arc<dyn Queryable + Send + Sync + 'static>,
 }
 
+#[async_trait::async_trait]
 impl super::SqlSchemaDescriberBackend for SqlSchemaDescriber {
-    fn list_databases(&self) -> SqlSchemaDescriberResult<Vec<String>> {
-        Ok(vec![])
+    async fn list_databases(&self) -> SqlSchemaDescriberResult<Vec<String>> {
+        let databases = self.get_databases().await;
+        Ok(databases)
     }
 
-    fn describe(&self, schema: &str) -> SqlSchemaDescriberResult<SqlSchema> {
+    async fn get_metadata(&self, schema: &str) -> SqlSchemaDescriberResult<SQLMetadata> {
+        let count = self.get_table_names(&schema).await.len();
+        let size = self.get_size(&schema).await;
+        Ok(SQLMetadata {
+            table_count: count,
+            size_in_bytes: size,
+        })
+    }
+
+    async fn describe(&self, schema: &str) -> SqlSchemaDescriberResult<SqlSchema> {
         debug!("describing schema '{}'", schema);
-        let tables = self
-            .get_table_names(schema)
-            .into_iter()
-            .map(|t| self.get_table(schema, &t))
-            .collect();
+        let table_names: Vec<String> = self.get_table_names(schema).await;
+
+        let mut tables = Vec::with_capacity(table_names.len());
+
+        for table_name in table_names.iter().filter(|table| !is_system_table(&table)) {
+            tables.push(self.get_table(schema, table_name).await)
+        }
+
+        //sqlite allows foreign key definitions without specifying the referenced columns, it then assumes the pk is used
+        let mut foreign_keys_without_referenced_columns = vec![];
+        for (table_index, table) in tables.iter().enumerate() {
+            for (fk_index, foreign_key) in table.foreign_keys.iter().enumerate() {
+                if foreign_key.referenced_columns.is_empty() {
+                    let referenced_table = tables.iter().find(|t| t.name == foreign_key.referenced_table).unwrap();
+                    let referenced_pk = referenced_table.primary_key.as_ref().unwrap();
+                    foreign_keys_without_referenced_columns.push((table_index, fk_index, referenced_pk.columns.clone()))
+                }
+            }
+        }
+
+        for (table_index, fk_index, columns) in foreign_keys_without_referenced_columns {
+            tables[table_index].foreign_keys[fk_index].referenced_columns = columns
+        }
+
         Ok(SqlSchema {
             // There's no enum type in SQLite.
             enums: vec![],
@@ -34,14 +62,32 @@ impl super::SqlSchemaDescriberBackend for SqlSchemaDescriber {
 
 impl SqlSchemaDescriber {
     /// Constructor.
-    pub fn new(conn: Arc<dyn SqlConnection>) -> SqlSchemaDescriber {
+    pub fn new(conn: Arc<dyn Queryable + Send + Sync + 'static>) -> SqlSchemaDescriber {
         SqlSchemaDescriber { conn }
     }
 
-    fn get_table_names(&self, schema: &str) -> Vec<String> {
+    async fn get_databases(&self) -> Vec<String> {
+        debug!("Getting databases");
+        let sql = "PRAGMA database_list;";
+        let rows = self.conn.query_raw(sql, &[]).await.expect("get schema names ");
+        let names = rows
+            .into_iter()
+            .map(|row| {
+                row.get("file")
+                    .and_then(|x| x.to_string())
+                    .and_then(|x| x.split("/").last().map(|x| x.to_string()))
+                    .expect("convert schema names")
+            })
+            .collect();
+
+        debug!("Found schema names: {:?}", names);
+        names
+    }
+
+    async fn get_table_names(&self, schema: &str) -> Vec<String> {
         let sql = format!(r#"SELECT name FROM "{}".sqlite_master WHERE type='table'"#, schema);
         debug!("describing table names with query: '{}'", sql);
-        let result_set = self.conn.query_raw(&sql, schema, &[]).expect("get table names");
+        let result_set = self.conn.query_raw(&sql, &[]).await.expect("get table names");
         let names = result_set
             .into_iter()
             .map(|row| row.get("name").and_then(|x| x.to_string()).unwrap())
@@ -51,11 +97,23 @@ impl SqlSchemaDescriber {
         names
     }
 
-    fn get_table(&self, schema: &str, name: &str) -> Table {
+    async fn get_size(&self, _schema: &str) -> usize {
+        debug!("Getting db size");
+        let sql = format!(r#"SELECT page_count * page_size as size FROM pragma_page_count(), pragma_page_size();"#);
+        let result = self.conn.query_raw(&sql, &[]).await.expect("get db size ");
+        let size: i64 = result
+            .first()
+            .map(|row| row.get("size").and_then(|x| x.as_i64()).unwrap_or(0))
+            .unwrap();
+
+        size.try_into().unwrap()
+    }
+
+    async fn get_table(&self, schema: &str, name: &str) -> Table {
         debug!("describing table '{}' in schema '{}", name, schema);
-        let (columns, primary_key) = self.get_columns(schema, name);
-        let foreign_keys = self.get_foreign_keys(schema, name);
-        let indices = self.get_indices(schema, name);
+        let (columns, primary_key) = self.get_columns(schema, name).await;
+        let foreign_keys = self.get_foreign_keys(schema, name).await;
+        let indices = self.get_indices(schema, name).await;
         Table {
             name: name.to_string(),
             columns,
@@ -65,36 +123,81 @@ impl SqlSchemaDescriber {
         }
     }
 
-    fn get_columns(&self, schema: &str, table: &str) -> (Vec<Column>, Option<PrimaryKey>) {
+    async fn get_columns(&self, schema: &str, table: &str) -> (Vec<Column>, Option<PrimaryKey>) {
         let sql = format!(r#"PRAGMA "{}".table_info ("{}")"#, schema, table);
         debug!("describing table columns, query: '{}'", sql);
-        let result_set = self.conn.query_raw(&sql, schema, &[]).unwrap();
+        let result_set = self.conn.query_raw(&sql, &[]).await.unwrap();
         let mut pk_cols: HashMap<i64, String> = HashMap::new();
         let mut cols: Vec<Column> = result_set
             .into_iter()
             .map(|row| {
                 debug!("Got column row {:?}", row);
-                let default_value = match row.get("dflt_value") {
-                    Some(ParameterizedValue::Text(v)) => Some(v.to_string()),
-                    Some(ParameterizedValue::Null) => None,
-                    Some(p) => panic!(format!("expected a string value but got {:?}", p)),
-                    None => panic!("couldn't get dflt_value column"),
-                };
-                let tpe = get_column_type(&row.get("type").and_then(|x| x.to_string()).expect("type"));
-                let pk_col = row.get("pk").and_then(|x| x.as_i64()).expect("primary key");
                 let is_required = row.get("notnull").and_then(|x| x.as_bool()).expect("notnull");
-                let arity = if tpe.raw.ends_with("[]") {
-                    ColumnArity::List
-                } else if is_required {
+
+                let arity = if is_required {
                     ColumnArity::Required
                 } else {
                     ColumnArity::Nullable
                 };
+                let tpe = get_column_type(&row.get("type").and_then(|x| x.to_string()).expect("type"), arity);
+
+                let default = match row.get("dflt_value") {
+                    None => None,
+                    Some(Value::Null) => None,
+                    Some(Value::Text(cow_string)) => {
+                        let default_string = cow_string.to_string();
+
+                        if default_string.to_lowercase() == "null" {
+                            None
+                        } else {
+                            Some(match &tpe.family {
+                                ColumnTypeFamily::Int => match parse_int(&default_string) {
+                                    Some(int_value) => DefaultValue::VALUE(int_value),
+                                    None => DefaultValue::DBGENERATED(default_string),
+                                },
+                                ColumnTypeFamily::Float => match parse_float(&default_string) {
+                                    Some(float_value) => DefaultValue::VALUE(float_value),
+                                    None => DefaultValue::DBGENERATED(default_string),
+                                },
+                                ColumnTypeFamily::Boolean => match parse_int(&default_string) {
+                                    Some(PrismaValue::Int(1)) => DefaultValue::VALUE(PrismaValue::Boolean(true)),
+                                    Some(PrismaValue::Int(0)) => DefaultValue::VALUE(PrismaValue::Boolean(false)),
+                                    _ => match parse_bool(&default_string) {
+                                        Some(bool_value) => DefaultValue::VALUE(bool_value),
+                                        None => DefaultValue::DBGENERATED(default_string),
+                                    },
+                                },
+                                ColumnTypeFamily::String => DefaultValue::VALUE(PrismaValue::String(
+                                    unquote_sqlite_string_default(&default_string).into(),
+                                )),
+                                ColumnTypeFamily::DateTime => match default_string.to_lowercase()
+                                    == "current_timestamp".to_string()
+                                    || default_string.to_lowercase() == "datetime(\'now\')".to_string()
+                                    || default_string.to_lowercase() == "datetime(\'now\', \'localtime\')".to_string()
+                                {
+                                    true => DefaultValue::NOW,
+                                    false => DefaultValue::DBGENERATED(default_string),
+                                },
+                                ColumnTypeFamily::Binary => DefaultValue::DBGENERATED(default_string),
+                                ColumnTypeFamily::Json => DefaultValue::DBGENERATED(default_string),
+                                ColumnTypeFamily::Uuid => DefaultValue::DBGENERATED(default_string),
+                                ColumnTypeFamily::Geometric => DefaultValue::DBGENERATED(default_string),
+                                ColumnTypeFamily::LogSequenceNumber => DefaultValue::DBGENERATED(default_string),
+                                ColumnTypeFamily::TextSearch => DefaultValue::DBGENERATED(default_string),
+                                ColumnTypeFamily::TransactionId => DefaultValue::DBGENERATED(default_string),
+                                ColumnTypeFamily::Enum(_) => DefaultValue::VALUE(PrismaValue::Enum(default_string)),
+                                ColumnTypeFamily::Unsupported(_) => DefaultValue::DBGENERATED(default_string),
+                            })
+                        }
+                    }
+                    Some(_) => None,
+                };
+
+                let pk_col = row.get("pk").and_then(|x| x.as_i64()).expect("primary key");
                 let col = Column {
                     name: row.get("name").and_then(|x| x.to_string()).expect("name"),
                     tpe,
-                    arity: arity.clone(),
-                    default: default_value.clone(),
+                    default,
                     auto_increment: false,
                 };
                 if pk_col > 0 {
@@ -102,11 +205,10 @@ impl SqlSchemaDescriber {
                 }
 
                 debug!(
-                    "Found column '{}', type: '{:?}', default: {:?}, arity: {:?}, primary key: {}",
+                    "Found column '{}', type: '{:?}', default: {:?}, primary key: {}",
                     col.name,
                     col.tpe,
                     col.default,
-                    arity,
                     pk_col > 0
                 );
 
@@ -128,11 +230,11 @@ impl SqlSchemaDescriber {
                     columns.push(pk_cols[i].clone());
                 }
 
-                // If the primary key is a single integer column, it's autoincrementing
+                //Integer Id columns are always implemented with either row id or autoincrement
                 if pk_cols.len() == 1 {
                     let pk_col = &columns[0];
                     for col in cols.iter_mut() {
-                        if &col.name == pk_col && &col.tpe.raw.to_lowercase() == "integer" {
+                        if &col.name == pk_col && &col.tpe.data_type.to_lowercase() == "integer" {
                             debug!(
                                 "Detected that the primary key column corresponds to rowid and \
                                  is auto incrementing"
@@ -153,7 +255,7 @@ impl SqlSchemaDescriber {
         (cols, primary_key)
     }
 
-    fn get_foreign_keys(&self, schema: &str, table: &str) -> Vec<ForeignKey> {
+    async fn get_foreign_keys(&self, schema: &str, table: &str) -> Vec<ForeignKey> {
         struct IntermediateForeignKey {
             pub columns: HashMap<i64, String>,
             pub referenced_table: String,
@@ -163,10 +265,7 @@ impl SqlSchemaDescriber {
 
         let sql = format!(r#"PRAGMA "{}".foreign_key_list("{}");"#, schema, table);
         debug!("describing table foreign keys, SQL: '{}'", sql);
-        let result_set = self
-            .conn
-            .query_raw(&sql, schema, &[])
-            .expect("querying for foreign keys");
+        let result_set = self.conn.query_raw(&sql, &[]).await.expect("querying for foreign keys");
 
         // Since one foreign key with multiple columns will be represented here as several
         // rows with the same ID, we have to use an intermediate representation that gets
@@ -177,18 +276,24 @@ impl SqlSchemaDescriber {
             let id = row.get("id").and_then(|x| x.as_i64()).expect("id");
             let seq = row.get("seq").and_then(|x| x.as_i64()).expect("seq");
             let column = row.get("from").and_then(|x| x.to_string()).expect("from");
-            let referenced_column = row.get("to").and_then(|x| x.to_string()).expect("to");
+            // this can be null if the primary key and shortened fk syntax was used
+            let referenced_column = row.get("to").and_then(|x| x.to_string());
             let referenced_table = row.get("table").and_then(|x| x.to_string()).expect("table");
             match intermediate_fks.get_mut(&id) {
                 Some(fk) => {
                     fk.columns.insert(seq, column);
-                    fk.referenced_columns.insert(seq, referenced_column);
+                    if let Some(column) = referenced_column {
+                        fk.referenced_columns.insert(seq, column);
+                    };
                 }
                 None => {
                     let mut columns: HashMap<i64, String> = HashMap::new();
                     columns.insert(seq, column);
                     let mut referenced_columns: HashMap<i64, String> = HashMap::new();
-                    referenced_columns.insert(seq, referenced_column);
+
+                    if let Some(column) = referenced_column {
+                        referenced_columns.insert(seq, column);
+                    };
                     let on_delete_action = match row
                         .get("on_delete")
                         .and_then(|x| x.to_string())
@@ -239,6 +344,10 @@ impl SqlSchemaDescriber {
                     referenced_table: intermediate_fk.referenced_table.to_owned(),
                     referenced_columns,
                     on_delete_action: intermediate_fk.on_delete_action.to_owned(),
+
+                    // Not relevant in SQLite since we cannot ALTER or DROP foreign keys by
+                    // constraint name.
+                    constraint_name: None,
                 };
                 debug!("Detected foreign key {:?}", fk);
                 fk
@@ -250,49 +359,57 @@ impl SqlSchemaDescriber {
         fks
     }
 
-    fn get_indices(&self, schema: &str, table: &str) -> Vec<Index> {
+    async fn get_indices(&self, schema: &str, table: &str) -> Vec<Index> {
         let sql = format!(r#"PRAGMA "{}".index_list("{}");"#, schema, table);
         debug!("describing table indices, SQL: '{}'", sql);
-        let result_set = self.conn.query_raw(&sql, schema, &[]).expect("querying for indices");
+        let result_set = self.conn.query_raw(&sql, &[]).await.expect("querying for indices");
         debug!("Got indices description results: {:?}", result_set);
-        result_set
+
+        let mut indices = Vec::new();
+        let filtered_rows = result_set
             .into_iter()
-            .map(|row| {
-                let is_unique = row.get("unique").and_then(|x| x.as_bool()).expect("get unique");
-                let name = row.get("name").and_then(|x| x.to_string()).expect("get name");
-                let mut index = Index {
-                    name: name.clone(),
-                    tpe: match is_unique {
-                        true => IndexType::Unique,
-                        false => IndexType::Normal,
-                    },
-                    columns: vec![],
-                };
+            // Exclude primary keys, they are inferred separately.
+            .filter(|row| row.get("origin").and_then(|origin| origin.as_str()).unwrap() != "pk");
 
-                let sql = format!(r#"PRAGMA "{}".index_info("{}");"#, schema, name);
-                debug!("describing table index '{}', SQL: '{}'", name, sql);
-                let result_set = self.conn.query_raw(&sql, schema, &[]).expect("querying for index info");
-                debug!("Got index description results: {:?}", result_set);
-                for row in result_set.into_iter() {
-                    let pos = row.get("seqno").and_then(|x| x.as_i64()).expect("get seqno") as usize;
-                    let col_name = row.get("name").and_then(|x| x.to_string()).expect("get name");
-                    if index.columns.len() <= pos {
-                        index.columns.resize(pos + 1, "".to_string());
-                    }
-                    index.columns[pos] = col_name;
+        for row in filtered_rows {
+            let is_unique = row.get("unique").and_then(|x| x.as_bool()).expect("get unique");
+            let name = row.get("name").and_then(|x| x.to_string()).expect("get name");
+            let mut index = Index {
+                name: name.clone(),
+                tpe: match is_unique {
+                    true => IndexType::Unique,
+                    false => IndexType::Normal,
+                },
+                columns: vec![],
+            };
+
+            let sql = format!(r#"PRAGMA "{}".index_info("{}");"#, schema, name);
+            debug!("describing table index '{}', SQL: '{}'", name, sql);
+            let result_set = self.conn.query_raw(&sql, &[]).await.expect("querying for index info");
+            debug!("Got index description results: {:?}", result_set);
+            for row in result_set.into_iter() {
+                let pos = row.get("seqno").and_then(|x| x.as_i64()).expect("get seqno") as usize;
+                let col_name = row.get("name").and_then(|x| x.to_string()).expect("get name");
+                if index.columns.len() <= pos {
+                    index.columns.resize(pos + 1, "".to_string());
                 }
+                index.columns[pos] = col_name;
+            }
 
-                index
-            })
-            .collect()
+            indices.push(index)
+        }
+
+        indices
     }
 }
 
-fn get_column_type(tpe: &str) -> ColumnType {
+fn get_column_type(tpe: &str, arity: ColumnArity) -> ColumnType {
     let tpe_lower = tpe.to_lowercase();
+
     let family = match tpe_lower.as_ref() {
         // SQLite only has a few native data types: https://www.sqlite.org/datatype3.html
         // It's tolerant though, and you can assign any data type you like to columns
+        "int" => ColumnTypeFamily::Int,
         "integer" => ColumnTypeFamily::Int,
         "real" => ColumnTypeFamily::Float,
         "float" => ColumnTypeFamily::Float,
@@ -300,20 +417,61 @@ fn get_column_type(tpe: &str) -> ColumnType {
         "boolean" => ColumnTypeFamily::Boolean,
         "text" => ColumnTypeFamily::String,
         s if s.contains("char") => ColumnTypeFamily::String,
+        s if s.contains("numeric") => ColumnTypeFamily::Float,
+        s if s.contains("decimal") => ColumnTypeFamily::Float,
         "date" => ColumnTypeFamily::DateTime,
+        "datetime" => ColumnTypeFamily::DateTime,
+        "timestamp" => ColumnTypeFamily::DateTime,
         "binary" => ColumnTypeFamily::Binary,
         "double" => ColumnTypeFamily::Float,
         "binary[]" => ColumnTypeFamily::Binary,
         "boolean[]" => ColumnTypeFamily::Boolean,
         "date[]" => ColumnTypeFamily::DateTime,
+        "datetime[]" => ColumnTypeFamily::DateTime,
+        "timestamp[]" => ColumnTypeFamily::DateTime,
         "double[]" => ColumnTypeFamily::Float,
         "float[]" => ColumnTypeFamily::Float,
+        "int[]" => ColumnTypeFamily::Int,
         "integer[]" => ColumnTypeFamily::Int,
         "text[]" => ColumnTypeFamily::String,
-        x => panic!(format!("type '{}' is not supported here yet", x)),
+        data_type => ColumnTypeFamily::Unsupported(data_type.into()),
     };
     ColumnType {
-        raw: tpe.to_string(),
-        family: family,
+        data_type: tpe.to_string(),
+        full_data_type: tpe.to_string(),
+        character_maximum_length: None,
+        family,
+        arity,
     }
 }
+
+// "A string constant is formed by enclosing the string in single quotes ('). A single quote within
+// the string can be encoded by putting two single quotes in a row - as in Pascal. C-style escapes
+// using the backslash character are not supported because they are not standard SQL."
+//
+// - https://www.sqlite.org/lang_expr.html
+fn unquote_sqlite_string_default(s: &str) -> Cow<'_, str> {
+    const SQLITE_STRING_DEFAULT_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r#"(?ms)^'(.*)'$|^"(.*)"$"#).unwrap());
+    const SQLITE_ESCAPED_CHARACTER_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r#"''"#).unwrap());
+
+    match SQLITE_STRING_DEFAULT_RE.replace(s, "$1$2") {
+        Cow::Borrowed(s) => SQLITE_ESCAPED_CHARACTER_RE.replace_all(s, "'"),
+        Cow::Owned(s) => SQLITE_ESCAPED_CHARACTER_RE.replace_all(&s, "'").into_owned().into(),
+    }
+}
+
+/// Returns whether a table is one of the SQLite system tables.
+fn is_system_table(table_name: &str) -> bool {
+    SQLITE_SYSTEM_TABLES
+        .iter()
+        .any(|system_table| table_name == *system_table)
+}
+
+/// See https://www.sqlite.org/fileformat2.html
+const SQLITE_SYSTEM_TABLES: &[&str] = &[
+    "sqlite_sequence",
+    "sqlite_stat1",
+    "sqlite_stat2",
+    "sqlite_stat3",
+    "sqlite_stat4",
+];

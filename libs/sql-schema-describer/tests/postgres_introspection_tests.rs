@@ -1,18 +1,16 @@
+mod common;
+mod postgres;
+mod test_api;
+
+use crate::{common::*, postgres::*};
 use barrel::{types, Migration};
 use pretty_assertions::assert_eq;
 use sql_schema_describer::*;
-use std::collections::HashSet;
+use test_api::*;
+use test_macros::test_each_connector;
 
-mod common;
-mod postgres;
-
-use crate::common::*;
-use crate::postgres::*;
-
-#[test]
-fn all_postgres_column_types_must_work() {
-    setup();
-
+#[tokio::test]
+async fn all_postgres_column_types_must_work() {
     let mut migration = Migration::new().schema(SCHEMA);
     migration.create_table("User", move |t| {
         t.add_column("array_bin_col", types::array(&types::binary()));
@@ -63,8 +61,8 @@ fn all_postgres_column_types_must_work() {
     });
 
     let full_sql = migration.make::<barrel::backend::Pg>();
-    let inspector = get_postgres_describer(&full_sql);
-    let result = inspector.describe(SCHEMA).expect("describing");
+    let inspector = get_postgres_describer(&full_sql, "all_postgres_column_types_must_work").await;
+    let result = inspector.describe(SCHEMA).await.expect("describing");
     let mut table = result.get_table("User").expect("couldn't get User table").to_owned();
     // Ensure columns are sorted as expected when comparing
     table.columns.sort_unstable_by_key(|c| c.name.to_owned());
@@ -72,449 +70,600 @@ fn all_postgres_column_types_must_work() {
         Column {
             name: "array_bin_col".into(),
             tpe: ColumnType {
-                raw: "_bytea".into(),
+                data_type: "ARRAY".into(),
+                full_data_type: "_bytea".into(),
+                character_maximum_length: None,
+
                 family: ColumnTypeFamily::Binary,
+                arity: ColumnArity::List,
             },
-            arity: ColumnArity::List,
             default: None,
             auto_increment: false,
         },
         Column {
             name: "array_bool_col".into(),
             tpe: ColumnType {
-                raw: "_bool".into(),
+                data_type: "ARRAY".into(),
+                full_data_type: "_bool".into(),
+                character_maximum_length: None,
+
                 family: ColumnTypeFamily::Boolean,
+                arity: ColumnArity::List,
             },
-            arity: ColumnArity::List,
             default: None,
             auto_increment: false,
         },
         Column {
             name: "array_date_col".into(),
             tpe: ColumnType {
-                raw: "_date".into(),
+                data_type: "ARRAY".into(),
+                full_data_type: "_date".into(),
+                character_maximum_length: None,
+
                 family: ColumnTypeFamily::DateTime,
+                arity: ColumnArity::List,
             },
-            arity: ColumnArity::List,
             default: None,
             auto_increment: false,
         },
         Column {
             name: "array_double_col".into(),
             tpe: ColumnType {
-                raw: "_float8".into(),
+                data_type: "ARRAY".into(),
+                full_data_type: "_float8".into(),
+                character_maximum_length: None,
+
                 family: ColumnTypeFamily::Float,
+                arity: ColumnArity::List,
             },
-            arity: ColumnArity::List,
             default: None,
             auto_increment: false,
         },
         Column {
             name: "array_float_col".into(),
             tpe: ColumnType {
-                raw: "_float8".into(),
+                data_type: "ARRAY".into(),
+                full_data_type: "_float8".into(),
+                character_maximum_length: None,
+
                 family: ColumnTypeFamily::Float,
+                arity: ColumnArity::List,
             },
-            arity: ColumnArity::List,
             default: None,
             auto_increment: false,
         },
         Column {
             name: "array_int_col".into(),
             tpe: ColumnType {
-                raw: "_int4".into(),
+                data_type: "ARRAY".into(),
+                full_data_type: "_int4".into(),
+                character_maximum_length: None,
+
                 family: ColumnTypeFamily::Int,
+                arity: ColumnArity::List,
             },
-            arity: ColumnArity::List,
             default: None,
             auto_increment: false,
         },
         Column {
             name: "array_text_col".into(),
             tpe: ColumnType {
-                raw: "_text".into(),
+                data_type: "ARRAY".into(),
+                full_data_type: "_text".into(),
+                character_maximum_length: None,
+
                 family: ColumnTypeFamily::String,
+                arity: ColumnArity::List,
             },
-            arity: ColumnArity::List,
             default: None,
             auto_increment: false,
         },
         Column {
             name: "array_varchar_col".into(),
             tpe: ColumnType {
-                raw: "_varchar".into(),
+                data_type: "ARRAY".into(),
+                full_data_type: "_varchar".into(),
+                character_maximum_length: None,
+
                 family: ColumnTypeFamily::String,
+                arity: ColumnArity::List,
             },
-            arity: ColumnArity::List,
             default: None,
             auto_increment: false,
         },
         Column {
             name: "binary_col".into(),
             tpe: ColumnType {
-                raw: "bytea".into(),
+                data_type: "bytea".into(),
+                full_data_type: "bytea".into(),
+                character_maximum_length: None,
+
                 family: ColumnTypeFamily::Binary,
+                arity: ColumnArity::Required,
             },
-            arity: ColumnArity::Required,
             default: None,
             auto_increment: false,
         },
         Column {
             name: "boolean_col".into(),
             tpe: ColumnType {
-                raw: "bool".into(),
+                data_type: "boolean".into(),
+                full_data_type: "bool".into(),
+                character_maximum_length: None,
+
                 family: ColumnTypeFamily::Boolean,
+                arity: ColumnArity::Required,
             },
-            arity: ColumnArity::Required,
             default: None,
             auto_increment: false,
         },
         Column {
             name: "date_time_col".into(),
             tpe: ColumnType {
-                raw: "date".into(),
+                data_type: "date".into(),
+                full_data_type: "date".into(),
+                character_maximum_length: None,
+
                 family: ColumnTypeFamily::DateTime,
+                arity: ColumnArity::Required,
             },
-            arity: ColumnArity::Required,
+
             default: None,
             auto_increment: false,
         },
         Column {
             name: "double_col".into(),
             tpe: ColumnType {
-                raw: "float8".into(),
+                data_type: "double precision".into(),
+                full_data_type: "float8".into(),
+                character_maximum_length: None,
+
                 family: ColumnTypeFamily::Float,
+                arity: ColumnArity::Required,
             },
-            arity: ColumnArity::Required,
+
             default: None,
             auto_increment: false,
         },
         Column {
             name: "float_col".into(),
             tpe: ColumnType {
-                raw: "float8".into(),
+                data_type: "double precision".into(),
+                full_data_type: "float8".into(),
+                character_maximum_length: None,
+
                 family: ColumnTypeFamily::Float,
+                arity: ColumnArity::Required,
             },
-            arity: ColumnArity::Required,
+
             default: None,
             auto_increment: false,
         },
         Column {
             name: "int_col".into(),
             tpe: ColumnType {
-                raw: "int4".into(),
+                data_type: "integer".into(),
+                full_data_type: "int4".into(),
+                character_maximum_length: None,
+
                 family: ColumnTypeFamily::Int,
+                arity: ColumnArity::Required,
             },
-            arity: ColumnArity::Required,
+
             default: None,
             auto_increment: false,
         },
         Column {
             name: "primary_col".into(),
             tpe: ColumnType {
-                raw: "int4".into(),
+                data_type: "integer".into(),
+                full_data_type: "int4".into(),
+                character_maximum_length: None,
+
                 family: ColumnTypeFamily::Int,
+                arity: ColumnArity::Required,
             },
-            arity: ColumnArity::Required,
-            default: Some(format!(
-                "nextval(\'\"{}\".\"User_primary_col_seq\"\'::regclass)",
+
+            default: Some(DefaultValue::SEQUENCE(format!(
+                "nextval('\"{}\".\"User_primary_col_seq\"'::regclass)",
                 SCHEMA
-            )),
+            ))),
             auto_increment: true,
         },
         Column {
             name: "string1_col".into(),
             tpe: ColumnType {
-                raw: "text".into(),
+                data_type: "text".into(),
+                full_data_type: "text".into(),
+                character_maximum_length: None,
+
                 family: ColumnTypeFamily::String,
+                arity: ColumnArity::Required,
             },
-            arity: ColumnArity::Required,
+
             default: None,
             auto_increment: false,
         },
         Column {
             name: "string2_col".into(),
             tpe: ColumnType {
-                raw: "varchar".into(),
+                data_type: "character varying".into(),
+                full_data_type: "varchar".into(),
+                character_maximum_length: Some(1),
                 family: ColumnTypeFamily::String,
+                arity: ColumnArity::Required,
             },
-            arity: ColumnArity::Required,
+
             default: None,
             auto_increment: false,
         },
         Column {
             name: "bigint_col".into(),
             tpe: ColumnType {
-                raw: "int8".into(),
+                data_type: "bigint".into(),
+                full_data_type: "int8".into(),
+                character_maximum_length: None,
+
                 family: ColumnTypeFamily::Int,
+                arity: ColumnArity::Required,
             },
-            arity: ColumnArity::Required,
+
             default: None,
             auto_increment: false,
         },
         Column {
             name: "bigserial_col".into(),
             tpe: ColumnType {
-                raw: "int8".into(),
+                data_type: "bigint".into(),
+                full_data_type: "int8".into(),
+                character_maximum_length: None,
                 family: ColumnTypeFamily::Int,
+                arity: ColumnArity::Required,
             },
-            arity: ColumnArity::Required,
-            default: Some(format!(
-                "nextval(\'\"{}\".\"User_bigserial_col_seq\"\'::regclass)",
+
+            default: Some(DefaultValue::SEQUENCE(format!(
+                "nextval('\"{}\".\"User_bigserial_col_seq\"'::regclass)",
                 SCHEMA
-            )),
+            ))),
             auto_increment: true,
         },
         Column {
             name: "bit_col".into(),
             tpe: ColumnType {
-                raw: "bit".into(),
-                family: ColumnTypeFamily::Binary,
+                data_type: "bit".into(),
+                full_data_type: "bit".into(),
+                character_maximum_length: Some(1),
+                family: ColumnTypeFamily::String,
+                arity: ColumnArity::Required,
             },
-            arity: ColumnArity::Required,
+
             default: None,
             auto_increment: false,
         },
         Column {
             name: "bit_varying_col".into(),
             tpe: ColumnType {
-                raw: "varbit".into(),
-                family: ColumnTypeFamily::Binary,
+                data_type: "bit varying".into(),
+                full_data_type: "varbit".into(),
+                character_maximum_length: Some(1),
+                family: ColumnTypeFamily::String,
+                arity: ColumnArity::Required,
             },
-            arity: ColumnArity::Required,
+
             default: None,
             auto_increment: false,
         },
         Column {
             name: "box_col".into(),
             tpe: ColumnType {
-                raw: "box".into(),
+                data_type: "box".into(),
+                full_data_type: "box".into(),
+                character_maximum_length: None,
                 family: ColumnTypeFamily::Geometric,
+                arity: ColumnArity::Required,
             },
-            arity: ColumnArity::Required,
+
             default: None,
             auto_increment: false,
         },
         Column {
             name: "char_col".into(),
             tpe: ColumnType {
-                raw: "bpchar".into(),
+                data_type: "character".into(),
+                full_data_type: "bpchar".into(),
+                character_maximum_length: Some(1),
                 family: ColumnTypeFamily::String,
+                arity: ColumnArity::Required,
             },
-            arity: ColumnArity::Required,
+
             default: None,
             auto_increment: false,
         },
         Column {
             name: "circle_col".into(),
             tpe: ColumnType {
-                raw: "circle".into(),
+                data_type: "circle".into(),
+                full_data_type: "circle".into(),
+                character_maximum_length: None,
                 family: ColumnTypeFamily::Geometric,
+                arity: ColumnArity::Required,
             },
-            arity: ColumnArity::Required,
+
             default: None,
             auto_increment: false,
         },
         Column {
             name: "interval_col".into(),
             tpe: ColumnType {
-                raw: "interval".into(),
-                family: ColumnTypeFamily::DateTime,
+                data_type: "interval".into(),
+                full_data_type: "interval".into(),
+                character_maximum_length: None,
+                family: ColumnTypeFamily::String,
+                arity: ColumnArity::Required,
             },
-            arity: ColumnArity::Required,
+
             default: None,
             auto_increment: false,
         },
         Column {
             name: "line_col".into(),
             tpe: ColumnType {
-                raw: "line".into(),
+                data_type: "line".into(),
+                full_data_type: "line".into(),
+                character_maximum_length: None,
                 family: ColumnTypeFamily::Geometric,
+                arity: ColumnArity::Required,
             },
-            arity: ColumnArity::Required,
+
             default: None,
             auto_increment: false,
         },
         Column {
             name: "lseg_col".into(),
             tpe: ColumnType {
-                raw: "lseg".into(),
+                data_type: "lseg".into(),
+                full_data_type: "lseg".into(),
+                character_maximum_length: None,
                 family: ColumnTypeFamily::Geometric,
+                arity: ColumnArity::Required,
             },
-            arity: ColumnArity::Required,
+
             default: None,
             auto_increment: false,
         },
         Column {
             name: "numeric_col".into(),
             tpe: ColumnType {
-                raw: "numeric".into(),
+                data_type: "numeric".into(),
+                full_data_type: "numeric".into(),
+                character_maximum_length: None,
                 family: ColumnTypeFamily::Float,
+                arity: ColumnArity::Required,
             },
-            arity: ColumnArity::Required,
+
             default: None,
             auto_increment: false,
         },
         Column {
             name: "path_col".into(),
             tpe: ColumnType {
-                raw: "path".into(),
+                data_type: "path".into(),
+                full_data_type: "path".into(),
+                character_maximum_length: None,
                 family: ColumnTypeFamily::Geometric,
+                arity: ColumnArity::Required,
             },
-            arity: ColumnArity::Required,
+
             default: None,
             auto_increment: false,
         },
         Column {
             name: "pg_lsn_col".into(),
             tpe: ColumnType {
-                raw: "pg_lsn".into(),
+                data_type: "pg_lsn".into(),
+                full_data_type: "pg_lsn".into(),
+                character_maximum_length: None,
                 family: ColumnTypeFamily::LogSequenceNumber,
+                arity: ColumnArity::Required,
             },
-            arity: ColumnArity::Required,
+
             default: None,
             auto_increment: false,
         },
         Column {
             name: "polygon_col".into(),
             tpe: ColumnType {
-                raw: "polygon".into(),
+                data_type: "polygon".into(),
+                full_data_type: "polygon".into(),
+                character_maximum_length: None,
                 family: ColumnTypeFamily::Geometric,
+                arity: ColumnArity::Required,
             },
-            arity: ColumnArity::Required,
+
             default: None,
             auto_increment: false,
         },
         Column {
             name: "smallint_col".into(),
             tpe: ColumnType {
-                raw: "int2".into(),
+                data_type: "smallint".into(),
+                full_data_type: "int2".into(),
+                character_maximum_length: None,
                 family: ColumnTypeFamily::Int,
+                arity: ColumnArity::Required,
             },
-            arity: ColumnArity::Required,
+
             default: None,
             auto_increment: false,
         },
         Column {
             name: "smallserial_col".into(),
             tpe: ColumnType {
-                raw: "int2".into(),
+                data_type: "smallint".into(),
+                full_data_type: "int2".into(),
+                character_maximum_length: None,
                 family: ColumnTypeFamily::Int,
+                arity: ColumnArity::Required,
             },
-            arity: ColumnArity::Required,
-            default: Some(format!(
+
+            default: Some(DefaultValue::SEQUENCE(format!(
                 "nextval('\"{}\".\"User_smallserial_col_seq\"'::regclass)",
                 SCHEMA
-            )),
+            ))),
             auto_increment: true,
         },
         Column {
             name: "serial_col".into(),
             tpe: ColumnType {
-                raw: "int4".into(),
+                data_type: "integer".into(),
+                full_data_type: "int4".into(),
+                character_maximum_length: None,
                 family: ColumnTypeFamily::Int,
+                arity: ColumnArity::Required,
             },
-            arity: ColumnArity::Required,
-            default: Some(format!("nextval('\"{}\".\"User_serial_col_seq\"'::regclass)", SCHEMA)),
+
+            default: Some(DefaultValue::SEQUENCE(format!(
+                "nextval('\"{}\".\"User_serial_col_seq\"'::regclass)",
+                SCHEMA
+            ))),
             auto_increment: true,
         },
         Column {
             name: "time_col".into(),
             tpe: ColumnType {
-                raw: "time".into(),
+                data_type: "time without time zone".into(),
+                full_data_type: "time".into(),
+                character_maximum_length: None,
                 family: ColumnTypeFamily::DateTime,
+                arity: ColumnArity::Required,
             },
-            arity: ColumnArity::Required,
+
             default: None,
             auto_increment: false,
         },
         Column {
             name: "time_with_zone_col".into(),
             tpe: ColumnType {
-                raw: "timetz".into(),
+                data_type: "time with time zone".into(),
+                full_data_type: "timetz".into(),
+                character_maximum_length: None,
+
                 family: ColumnTypeFamily::DateTime,
+                arity: ColumnArity::Required,
             },
-            arity: ColumnArity::Required,
+
             default: None,
             auto_increment: false,
         },
         Column {
             name: "timestamp_col".into(),
             tpe: ColumnType {
-                raw: "timestamp".into(),
+                data_type: "timestamp without time zone".into(),
+                full_data_type: "timestamp".into(),
+                character_maximum_length: None,
+
                 family: ColumnTypeFamily::DateTime,
+                arity: ColumnArity::Required,
             },
-            arity: ColumnArity::Required,
+
             default: None,
             auto_increment: false,
         },
         Column {
             name: "timestamp_with_zone_col".into(),
             tpe: ColumnType {
-                raw: "timestamptz".into(),
+                data_type: "timestamp with time zone".into(),
+                full_data_type: "timestamptz".into(),
+                character_maximum_length: None,
+
                 family: ColumnTypeFamily::DateTime,
+                arity: ColumnArity::Required,
             },
-            arity: ColumnArity::Required,
+
             default: None,
             auto_increment: false,
         },
         Column {
             name: "tsquery_col".into(),
             tpe: ColumnType {
-                raw: "tsquery".into(),
+                data_type: "tsquery".into(),
+                full_data_type: "tsquery".into(),
+                character_maximum_length: None,
+
                 family: ColumnTypeFamily::TextSearch,
+                arity: ColumnArity::Required,
             },
-            arity: ColumnArity::Required,
+
             default: None,
             auto_increment: false,
         },
         Column {
             name: "tsvector_col".into(),
             tpe: ColumnType {
-                raw: "tsvector".into(),
+                data_type: "tsvector".into(),
+                full_data_type: "tsvector".into(),
+                character_maximum_length: None,
+
                 family: ColumnTypeFamily::TextSearch,
+                arity: ColumnArity::Required,
             },
-            arity: ColumnArity::Required,
+
             default: None,
             auto_increment: false,
         },
         Column {
             name: "txid_col".into(),
             tpe: ColumnType {
-                raw: "txid_snapshot".into(),
+                data_type: "txid_snapshot".into(),
+                full_data_type: "txid_snapshot".into(),
+                character_maximum_length: None,
+
                 family: ColumnTypeFamily::TransactionId,
+                arity: ColumnArity::Required,
             },
-            arity: ColumnArity::Required,
+
             default: None,
             auto_increment: false,
         },
         Column {
             name: "json_col".into(),
             tpe: ColumnType {
-                raw: "json".into(),
+                data_type: "json".into(),
+                full_data_type: "json".into(),
+                character_maximum_length: None,
+
                 family: ColumnTypeFamily::Json,
+                arity: ColumnArity::Required,
             },
-            arity: ColumnArity::Required,
+
             default: None,
             auto_increment: false,
         },
         Column {
             name: "jsonb_col".into(),
             tpe: ColumnType {
-                raw: "jsonb".into(),
+                data_type: "jsonb".into(),
+                full_data_type: "jsonb".into(),
+                character_maximum_length: None,
+
                 family: ColumnTypeFamily::Json,
+                arity: ColumnArity::Required,
             },
-            arity: ColumnArity::Required,
+
             default: None,
             auto_increment: false,
         },
         Column {
             name: "uuid_col".into(),
             tpe: ColumnType {
-                raw: "uuid".into(),
+                data_type: "uuid".into(),
+                full_data_type: "uuid".into(),
+                character_maximum_length: None,
+
                 family: ColumnTypeFamily::Uuid,
+                arity: ColumnArity::Required,
             },
-            arity: ColumnArity::Required,
+
             default: None,
             auto_increment: false,
         },
@@ -544,10 +693,8 @@ fn all_postgres_column_types_must_work() {
     );
 }
 
-#[test]
-fn postgres_foreign_key_on_delete_must_be_handled() {
-    setup();
-
+#[tokio::test]
+async fn postgres_foreign_key_on_delete_must_be_handled() {
     let sql = format!(
         "CREATE TABLE \"{0}\".\"City\" (id INT PRIMARY KEY);
          CREATE TABLE \"{0}\".\"User\" (
@@ -561,9 +708,9 @@ fn postgres_foreign_key_on_delete_must_be_handled() {
         ",
         SCHEMA
     );
-    let inspector = get_postgres_describer(&sql);
+    let inspector = get_postgres_describer(&sql, "postgres_foreign_key_on_delete_must_be_handled").await;
 
-    let schema = inspector.describe(SCHEMA).expect("describing");
+    let schema = inspector.describe(SCHEMA).await.expect("describing");
     let mut table = schema.get_table("User").expect("get User table").to_owned();
     table.foreign_keys.sort_unstable_by_key(|fk| fk.columns.clone());
 
@@ -575,60 +722,79 @@ fn postgres_foreign_key_on_delete_must_be_handled() {
                 Column {
                     name: "city".into(),
                     tpe: ColumnType {
-                        raw: "int4".into(),
+                        data_type: "integer".into(),
+                        full_data_type: "int4".into(),
+                        character_maximum_length: None,
+
                         family: ColumnTypeFamily::Int,
+                        arity: ColumnArity::Nullable,
                     },
-                    arity: ColumnArity::Nullable,
                     default: None,
                     auto_increment: false,
                 },
                 Column {
                     name: "city_cascade".into(),
                     tpe: ColumnType {
-                        raw: "int4".into(),
+                        data_type: "integer".into(),
+                        full_data_type: "int4".into(),
+                        character_maximum_length: None,
+
                         family: ColumnTypeFamily::Int,
+                        arity: ColumnArity::Nullable,
                     },
-                    arity: ColumnArity::Nullable,
                     default: None,
                     auto_increment: false,
                 },
                 Column {
                     name: "city_restrict".into(),
                     tpe: ColumnType {
-                        raw: "int4".into(),
+                        data_type: "integer".into(),
+                        full_data_type: "int4".into(),
+                        character_maximum_length: None,
+
                         family: ColumnTypeFamily::Int,
+                        arity: ColumnArity::Nullable,
                     },
-                    arity: ColumnArity::Nullable,
                     default: None,
                     auto_increment: false,
                 },
                 Column {
                     name: "city_set_default".into(),
                     tpe: ColumnType {
-                        raw: "int4".into(),
+                        data_type: "integer".into(),
+                        full_data_type: "int4".into(),
+                        character_maximum_length: None,
+
                         family: ColumnTypeFamily::Int,
+                        arity: ColumnArity::Nullable,
                     },
-                    arity: ColumnArity::Nullable,
                     default: None,
                     auto_increment: false,
                 },
                 Column {
                     name: "city_set_null".into(),
                     tpe: ColumnType {
-                        raw: "int4".into(),
+                        data_type: "integer".into(),
+                        full_data_type: "int4".into(),
+                        character_maximum_length: None,
+
                         family: ColumnTypeFamily::Int,
+                        arity: ColumnArity::Nullable,
                     },
-                    arity: ColumnArity::Nullable,
                     default: None,
                     auto_increment: false,
                 },
                 Column {
                     name: "id".into(),
                     tpe: ColumnType {
-                        raw: "int4".into(),
+                        data_type: "integer".into(),
+                        full_data_type: "int4".into(),
+                        character_maximum_length: None,
+
                         family: ColumnTypeFamily::Int,
+                        arity: ColumnArity::Required,
                     },
-                    arity: ColumnArity::Required,
+
                     default: None,
                     auto_increment: false,
                 },
@@ -640,30 +806,35 @@ fn postgres_foreign_key_on_delete_must_be_handled() {
             }),
             foreign_keys: vec![
                 ForeignKey {
+                    constraint_name: Some("User_city_fkey".to_owned()),
                     columns: vec!["city".into()],
                     referenced_columns: vec!["id".into()],
                     referenced_table: "City".into(),
                     on_delete_action: ForeignKeyAction::NoAction,
                 },
                 ForeignKey {
+                    constraint_name: Some("User_city_cascade_fkey".to_owned()),
                     columns: vec!["city_cascade".into()],
                     referenced_columns: vec!["id".into()],
                     referenced_table: "City".into(),
                     on_delete_action: ForeignKeyAction::Cascade,
                 },
                 ForeignKey {
+                    constraint_name: Some("User_city_restrict_fkey".to_owned()),
                     columns: vec!["city_restrict".into()],
                     referenced_columns: vec!["id".into()],
                     referenced_table: "City".into(),
                     on_delete_action: ForeignKeyAction::Restrict,
                 },
                 ForeignKey {
+                    constraint_name: Some("User_city_set_default_fkey".to_owned()),
                     columns: vec!["city_set_default".into()],
                     referenced_columns: vec!["id".into()],
                     referenced_table: "City".into(),
                     on_delete_action: ForeignKeyAction::SetDefault,
                 },
                 ForeignKey {
+                    constraint_name: Some("User_city_set_null_fkey".to_owned()),
                     columns: vec!["city_set_null".into()],
                     referenced_columns: vec!["id".into()],
                     referenced_table: "City".into(),
@@ -674,19 +845,18 @@ fn postgres_foreign_key_on_delete_must_be_handled() {
     );
 }
 
-#[test]
-fn postgres_enums_must_work() {
-    setup();
+#[tokio::test]
+async fn postgres_enums_must_work() {
+    let inspector = get_postgres_describer(
+        &format!("CREATE TYPE \"{}\".\"mood\" AS ENUM ('sad', 'ok', 'happy')", SCHEMA),
+        "postgres_enums_must_work",
+    )
+    .await;
 
-    let inspector = get_postgres_describer(&format!(
-        "CREATE TYPE \"{}\".\"mood\" AS ENUM ('sad', 'ok', 'happy')",
-        SCHEMA
-    ));
-
-    let schema = inspector.describe(SCHEMA).expect("describing");
+    let schema = inspector.describe(SCHEMA).await.expect("describing");
     let got_enum = schema.get_enum("mood").expect("get enum");
 
-    let values: HashSet<String> = ["happy".into(), "ok".into(), "sad".into()].iter().cloned().collect();
+    let values: Vec<String> = vec!["happy".into(), "ok".into(), "sad".into()];
     assert_eq!(
         got_enum,
         &Enum {
@@ -696,13 +866,15 @@ fn postgres_enums_must_work() {
     );
 }
 
-#[test]
-fn postgres_sequences_must_work() {
-    setup();
+#[tokio::test]
+async fn postgres_sequences_must_work() {
+    let inspector = get_postgres_describer(
+        &format!("CREATE SEQUENCE \"{}\".\"test\"", SCHEMA),
+        "postgres_sequences_must_work",
+    )
+    .await;
 
-    let inspector = get_postgres_describer(&format!("CREATE SEQUENCE \"{}\".\"test\"", SCHEMA));
-
-    let schema = inspector.describe(SCHEMA).expect("describing");
+    let schema = inspector.describe(SCHEMA).await.expect("describing");
     let got_seq = schema.get_sequence("test").expect("get sequence");
 
     assert_eq!(
@@ -713,4 +885,113 @@ fn postgres_sequences_must_work() {
             allocation_size: 1,
         },
     );
+}
+
+#[tokio::test]
+async fn postgres_multi_field_indexes_must_be_inferred_in_the_right_order() {
+    let schema = format!(
+        r##"
+            CREATE TABLE "{schema_name}"."indexes_test" (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                age INTEGER NOT NULL
+            );
+
+            CREATE UNIQUE INDEX "my_idx" ON "{schema_name}"."indexes_test" (name, age);
+            CREATE INDEX "my_idx2" ON "{schema_name}"."indexes_test" (age, name);
+        "##,
+        schema_name = SCHEMA
+    );
+
+    let inspector = get_postgres_describer(&schema, "postgres_multi_field_indexes").await;
+    let schema = inspector.describe(SCHEMA).await.unwrap();
+
+    let table = schema.table_bang("indexes_test");
+    let index = &table.indices[0];
+
+    assert_eq!(&index.columns, &["name", "age"]);
+    assert!(index.tpe.is_unique());
+
+    let index = &table.indices[1];
+
+    assert!(!index.tpe.is_unique());
+    assert_eq!(&index.columns, &["age", "name"]);
+}
+
+#[test_each_connector(tags("postgres"))]
+async fn escaped_quotes_in_string_defaults_must_be_unescaped(api: &TestApi) -> TestResult {
+    let create_table = format!(
+        r#"
+            CREATE TABLE "{0}"."string_defaults_test" (
+                id INTEGER PRIMARY KEY,
+                regular VARCHAR NOT NULL DEFAULT E'meow, says the cat',
+                escaped VARCHAR NOT NULL DEFAULT E'"That\'s a lot of fish!" - Godzilla, 1998'
+            );
+        "#,
+        api.schema_name()
+    );
+
+    api.database().query_raw(&create_table, &[]).await?;
+
+    let schema = api.describe().await?;
+
+    let table = schema.table_bang("string_defaults_test");
+
+    let regular_column_default = table
+        .column_bang("regular")
+        .default
+        .as_ref()
+        .unwrap()
+        .as_value()
+        .unwrap()
+        .clone()
+        .into_string()
+        .unwrap();
+
+    assert_eq!(regular_column_default, "meow, says the cat");
+
+    let escaped_column_default = table
+        .column_bang("escaped")
+        .default
+        .as_ref()
+        .unwrap()
+        .as_value()
+        .unwrap()
+        .clone()
+        .into_string()
+        .unwrap();
+
+    assert_eq!(escaped_column_default, r#""That's a lot of fish!" - Godzilla, 1998"#);
+
+    Ok(())
+}
+
+#[test_each_connector(tags("postgres"))]
+async fn escaped_backslashes_in_string_literals_must_be_unescaped(api: &TestApi) -> TestResult {
+    let create_table = r#"
+        CREATE TABLE test (
+            "model_name_space" VARCHAR(255) NOT NULL DEFAULT 'xyz\\Datasource\\Model'
+        )
+    "#;
+
+    api.database().query_raw(&create_table, &[]).await?;
+
+    let schema = api.describe().await?;
+
+    let table = schema.table_bang("test");
+
+    let default = table
+        .column_bang("model_name_space")
+        .default
+        .as_ref()
+        .unwrap()
+        .as_value()
+        .unwrap()
+        .clone()
+        .into_string()
+        .unwrap();
+
+    assert_eq!(default, "xyz\\Datasource\\Model");
+
+    Ok(())
 }

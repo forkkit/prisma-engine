@@ -1,66 +1,124 @@
-use crate::connector_loader::load_connector;
-use crate::CoreResult;
-use datamodel::Datamodel;
-use jsonrpc_core::*;
+use crate::command_error::CommandError;
+use crate::error::Error;
+use crate::error_rendering::render_jsonrpc_error;
+use futures::{FutureExt, TryFutureExt};
+use introspection_connector::{DatabaseMetadata, IntrospectionConnector, IntrospectionResultOutput};
 use jsonrpc_derive::rpc;
+use serde_derive::*;
+use sql_introspection_connector::SqlIntrospectionConnector;
+
+type RpcError = jsonrpc_core::Error;
+type RpcResult<T> = Result<T, RpcError>;
+type RpcFutureResult<T> = Box<dyn futures01::Future<Item = T, Error = RpcError> + Send + 'static>;
 
 #[rpc]
 pub trait Rpc {
     #[rpc(name = "listDatabases")]
-    fn list_databases(&self, url: UrlInput) -> Result<Vec<String>>;
+    fn list_databases(&self, input: IntrospectionInput) -> RpcFutureResult<Vec<String>>;
 
     #[rpc(name = "getDatabaseMetadata")]
-    fn get_database_metadata(&self, url: UrlInput) -> Result<DatabaseMetadata>;
+    fn get_database_metadata(&self, input: IntrospectionInput) -> RpcFutureResult<DatabaseMetadata>;
+
+    #[rpc(name = "getDatabaseDescription")]
+    fn get_database_description(&self, input: IntrospectionInput) -> RpcFutureResult<String>;
 
     #[rpc(name = "introspect")]
-    fn introspect(&self, url: UrlInput) -> Result<String>;
+    fn introspect(&self, input: IntrospectionInput) -> RpcFutureResult<IntrospectionResultOutput>;
 }
 
-pub struct RpcImpl {}
+pub struct RpcImpl;
 
 impl Rpc for RpcImpl {
-    fn list_databases(&self, url: UrlInput) -> Result<Vec<String>> {
-        Ok(Self::list_databases_internal(url)?)
+    fn list_databases(&self, input: IntrospectionInput) -> RpcFutureResult<Vec<String>> {
+        Box::new(Self::list_databases_internal(input.schema).boxed().compat())
     }
 
-    fn get_database_metadata(&self, url: UrlInput) -> Result<DatabaseMetadata> {
-        Ok(Self::get_database_metadata_internal(url)?)
+    fn get_database_metadata(&self, input: IntrospectionInput) -> RpcFutureResult<DatabaseMetadata> {
+        Box::new(Self::get_database_metadata_internal(input.schema).boxed().compat())
     }
 
-    fn introspect(&self, url: UrlInput) -> Result<String> {
-        let data_model = Self::introspect_internal(url)?;
-        Ok(datamodel::render_to_string(&data_model).expect("Datamodel rendering failed"))
+    fn get_database_description(&self, input: IntrospectionInput) -> RpcFutureResult<String> {
+        Box::new(Self::get_database_description(input.schema).boxed().compat())
+    }
+
+    fn introspect(&self, input: IntrospectionInput) -> RpcFutureResult<IntrospectionResultOutput> {
+        Box::new(Self::introspect_internal(input.schema).boxed().compat())
     }
 }
 
 impl RpcImpl {
-    fn introspect_internal(url: UrlInput) -> CoreResult<Datamodel> {
-        let connector = load_connector(&url.url)?;
-        // FIXME: parse URL correctly via a to be built lib and pass database param;
-        let data_model = connector.introspect("")?;
-        Ok(data_model)
+    pub fn new() -> Self {
+        RpcImpl
     }
 
-    fn list_databases_internal(url: UrlInput) -> CoreResult<Vec<String>> {
-        let connector = load_connector(&url.url)?;
-        Ok(connector.list_databases()?)
+    async fn load_connector(schema: &String) -> Result<Box<dyn IntrospectionConnector>, Error> {
+        let config = datamodel::parse_configuration(&schema)?;
+        let url = config
+            .datasources
+            .first()
+            .ok_or_else(|| CommandError::Generic(anyhow::anyhow!("There is no datasource in the schema.")))?
+            .url()
+            .to_owned()
+            .value;
+        Ok(Box::new(SqlIntrospectionConnector::new(&url).await?))
     }
 
-    fn get_database_metadata_internal(_url: UrlInput) -> CoreResult<DatabaseMetadata> {
-        Ok(DatabaseMetadata {
-            model_count: 10,
-            size_in_bytes: 1234,
-        })
+    pub async fn introspect_internal(schema: String) -> RpcResult<IntrospectionResultOutput> {
+        let config = datamodel::parse_configuration(&schema).map_err(Error::from)?;
+        let url = config
+            .datasources
+            .first()
+            .ok_or_else(|| CommandError::Generic(anyhow::anyhow!("There is no datasource in the schema.")))
+            .map_err(Error::from)?
+            .url()
+            .to_owned()
+            .value;
+        let connector = RpcImpl::load_connector(&schema).await?;
+        let data_model = connector.introspect().await;
+
+        match data_model {
+            Ok(introspection_result)
+                if introspection_result.datamodel.models.is_empty()
+                    && introspection_result.datamodel.enums.is_empty() =>
+            {
+                Err(render_jsonrpc_error(Error::from(
+                    CommandError::IntrospectionResultEmpty(url.to_string()),
+                )))
+            }
+            Ok(introspection_result) => {
+                let result = IntrospectionResultOutput {
+                    datamodel: datamodel::render_datamodel_and_config_to_string(
+                        &introspection_result.datamodel,
+                        &config,
+                    )
+                    .map_err(Error::from)?,
+                    warnings: introspection_result.warnings,
+                    version: introspection_result.version,
+                };
+
+                Ok(result)
+            }
+            Err(e) => Err(render_jsonrpc_error(Error::from(e))),
+        }
+    }
+
+    pub async fn list_databases_internal(schema: String) -> RpcResult<Vec<String>> {
+        let connector = RpcImpl::load_connector(&schema).await?;
+        Ok(connector.list_databases().await.map_err(Error::from)?)
+    }
+
+    pub async fn get_database_description(schema: String) -> RpcResult<String> {
+        let connector = RpcImpl::load_connector(&schema).await?;
+        Ok(connector.get_database_description().await.map_err(Error::from)?)
+    }
+
+    pub async fn get_database_metadata_internal(schema: String) -> RpcResult<DatabaseMetadata> {
+        let connector = RpcImpl::load_connector(&schema).await?;
+        Ok(connector.get_metadata().await.map_err(Error::from)?)
     }
 }
 
-#[derive(Serialize, Deserialize)]
-pub struct DatabaseMetadata {
-    model_count: usize,
-    size_in_bytes: usize,
-}
-
-#[derive(Serialize, Deserialize)]
-pub struct UrlInput {
-    url: String,
+#[derive(Debug, Serialize, Deserialize)]
+pub struct IntrospectionInput {
+    pub(crate) schema: String,
 }

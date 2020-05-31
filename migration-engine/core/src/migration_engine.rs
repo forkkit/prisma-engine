@@ -1,7 +1,7 @@
-use crate::commands::CommandResult;
 use crate::migration::datamodel_calculator::*;
 use crate::migration::datamodel_migration_steps_inferrer::*;
-use datamodel::dml::*;
+use crate::{commands::CommandResult, CoreResult};
+use datamodel::ast::SchemaAst;
 use migration_connector::*;
 use std::sync::Arc;
 
@@ -18,27 +18,27 @@ where
 impl<C, D> MigrationEngine<C, D>
 where
     C: MigrationConnector<DatabaseMigration = D>,
-    D: DatabaseMigrationMarker + 'static,
+    D: DatabaseMigrationMarker + Send + Sync + 'static,
 {
-    pub fn new(connector: C) -> crate::Result<Self> {
+    pub async fn new(connector: C) -> CoreResult<Self> {
         let engine = MigrationEngine {
             datamodel_migration_steps_inferrer: Arc::new(DataModelMigrationStepsInferrerImplWrapper {}),
-            datamodel_calculator: Arc::new(DataModelCalculatorImpl {}),
+            datamodel_calculator: Arc::new(DataModelCalculatorImpl),
             connector,
         };
 
-        engine.init()?;
+        engine.init().await?;
 
         Ok(engine)
     }
 
-    pub fn init(&self) -> CommandResult<()> {
-        self.connector().initialize()?;
+    pub async fn init(&self) -> CommandResult<()> {
+        self.connector().initialize().await?;
         Ok(())
     }
 
-    pub fn reset(&self) -> CommandResult<()> {
-        self.connector().reset()?;
+    pub async fn reset(&self) -> CommandResult<()> {
+        self.connector().reset().await?;
         Ok(())
     }
 
@@ -54,7 +54,7 @@ where
         &self.datamodel_calculator
     }
 
-    pub fn render_datamodel(&self, datamodel: &Datamodel) -> String {
-        datamodel::render(&datamodel).expect("Rendering the Datamodel failed.")
+    pub fn render_schema_ast(&self, schema_ast: &SchemaAst) -> String {
+        datamodel::render_schema_ast_to_string(&schema_ast).expect("Rendering the schema failed")
     }
 }

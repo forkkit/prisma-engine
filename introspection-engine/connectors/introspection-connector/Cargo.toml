@@ -7,5 +7,11 @@ edition = "2018"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-datamodel = { path = "../../../libs/datamodel" }
-failure = "0.1"
+async-trait = "0.1.17"
+datamodel = { path = "../../../libs/datamodel/core" }
+thiserror = "1.0.9"
+anyhow = "1.0.26"
+
+serde = { version = "1.0", features = ["derive"]}
+serde_json = "1.0"
+user-facing-errors = { path = "../../../libs/user-facing-errors" }

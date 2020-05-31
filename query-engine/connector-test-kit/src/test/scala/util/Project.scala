@@ -1,6 +1,8 @@
 package util
 
 import java.io.{File, PrintWriter}
+import java.nio.charset.StandardCharsets
+import java.util.Base64
 
 import org.scalatest.Suite
 
@@ -9,9 +11,7 @@ case class Project(
     dataModel: String,
 ) {
   val dataSourceUrl: String = {
-    ConnectorConfig
-      .instance
-      .url
+    ConnectorConfig.instance.url
       .replaceAllLiterally("$DB_FILE", s"${EnvVars.serverRoot}/db/$id.db")
       .replaceAllLiterally("$DB", id)
   }
@@ -31,10 +31,38 @@ case class Project(
     dataSourceConfig + "\n" + dataModel
   }
 
+  val envVar = UTF8Base64.encode(dataModelWithDataSourceConfig)
+
+  val pgBouncerEnvVar = {
+    val host = {
+      if (EnvVars.isBuildkite) {
+        "test-db-pgbouncer"
+      } else {
+        "127.0.0.1"
+      }
+    }
+
+    val url = s"postgresql://postgres:prisma@$host:6432/db?schema=$id&connection_limit=1&pgbouncer=true"
+
+    val config =
+      s"""
+         |datasource test {
+         |  provider = "${ConnectorConfig.instance.provider}"
+         |  url = "${url}"
+         |}
+         |
+         |$dataModel
+      """.stripMargin
+
+    UTF8Base64.encode(config)
+  }
+
+  val isPgBouncer = ConnectorConfig.instance.isBouncer
+
   val dataModelPath: String = {
     val pathName = s"${EnvVars.serverRoot}/db/$id.prisma"
-    val file = new File(pathName)
-    val writer = new PrintWriter(file)
+    val file     = new File(pathName)
+    val writer   = new PrintWriter(file)
 
     try {
       dataModelWithDataSourceConfig.foreach(writer.print)
@@ -63,10 +91,7 @@ trait Dsl {
   }
 
   private def projectId(suite: Suite): String = {
-    // GetFieldFromSQLUniqueException blows up if we generate longer names, since we then exceed the postgres limits for constraint names
-    // todo: actually fix GetFieldFromSQLUniqueException instead
-    val nameThatMightBeTooLong = suite.getClass.getSimpleName
-    nameThatMightBeTooLong.substring(0, Math.min(32, nameThatMightBeTooLong.length))
+    suite.getClass.getSimpleName
   }
 }
 

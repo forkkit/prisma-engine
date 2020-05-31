@@ -1,102 +1,95 @@
-use crate::{query_builder::ManyRelatedRecordsWithRowNumber, FromSource, SqlCapabilities, Transaction, Transactional};
-use datamodel::Source;
-use prisma_query::{
-    ast::ParameterizedValue,
-    connector::{Queryable, SqliteParams},
-    pool::{sqlite::SqliteConnectionManager, PrismaConnectionManager},
+use super::connection::SqlConnection;
+use crate::{FromSource, SqlError};
+use async_trait::async_trait;
+use connector_interface::{
+    self as connector,
+    error::{ConnectorError, ErrorKind},
+    Connection, Connector,
 };
-use std::{collections::HashSet, convert::TryFrom};
-
-type Pool = r2d2::Pool<PrismaConnectionManager<SqliteConnectionManager>>;
+use datamodel::Source;
+use quaint::{connector::SqliteParams, error::ErrorKind as QuaintKind, pooled::Quaint, prelude::ConnectionInfo};
+use std::{convert::TryFrom, time::Duration};
 
 pub struct Sqlite {
-    pool: Pool,
-    test_mode: bool,
+    pool: Quaint,
     file_path: String,
 }
 
 impl Sqlite {
-    pub fn new(file_path: String, connection_limit: u32, test_mode: bool) -> crate::Result<Self> {
-        let manager = PrismaConnectionManager::sqlite(None, &file_path)?;
-        let pool = r2d2::Pool::builder().max_size(connection_limit).build(manager)?;
-
-        Ok(Self {
-            pool,
-            test_mode,
-            file_path,
-        })
-    }
-
     pub fn file_path(&self) -> &str {
         self.file_path.as_str()
     }
-}
 
-impl FromSource for Sqlite {
-    fn from_source(source: &dyn Source) -> crate::Result<Self> {
-        let params = SqliteParams::try_from(source.url().value.as_str())?;
-
-        let file_path = params.file_path.clone();
-        let pool = r2d2::Pool::try_from(params).unwrap();
-
-        Ok(Sqlite {
-            pool,
-            test_mode: false,
-            file_path: file_path.to_str().unwrap().to_string(),
-        })
+    fn connection_info(&self) -> &ConnectionInfo {
+        self.pool.connection_info()
     }
 }
 
-impl SqlCapabilities for Sqlite {
-    type ManyRelatedRecordsBuilder = ManyRelatedRecordsWithRowNumber;
-}
+#[async_trait]
+impl FromSource for Sqlite {
+    async fn from_source(source: &dyn Source) -> connector_interface::Result<Sqlite> {
+        let connection_info = ConnectionInfo::from_url(&source.url().value)
+            .map_err(|err| ConnectorError::from_kind(ErrorKind::ConnectionError(err.into())))?;
 
-impl Transactional for Sqlite {
-    fn with_transaction<F, T>(&self, db: &str, f: F) -> crate::Result<T>
-    where
-        F: FnOnce(&mut dyn Transaction) -> crate::Result<T>,
-    {
-        let mut conn = self.pool.get()?;
+        let params = SqliteParams::try_from(source.url().value.as_str())
+            .map_err(SqlError::from)
+            .map_err(|sql_error| sql_error.into_connector_error(&connection_info))?;
 
-        let databases: HashSet<String> = conn
-            .query_raw("PRAGMA database_list", &[])?
-            .into_iter()
-            .map(|rr| {
-                let db_name = rr.into_iter().nth(1).unwrap();
+        let file_path = params.file_path;
 
-                db_name.into_string().unwrap()
-            })
-            .collect();
+        let url_with_db = {
+            let db_name = std::path::Path::new(&file_path)
+                .file_stem()
+                .and_then(|stem| stem.to_str())
+                .ok_or_else(|| invalid_file_path_error(&file_path, &connection_info))?
+                .to_owned();
 
-        if !databases.contains(db) {
-            // This is basically hacked until we have a full rust stack with a migration engine.
-            // Currently, the scala tests use the JNA library to write to the database.
-            conn.execute_raw(
-                "ATTACH DATABASE ? AS ?",
-                &[
-                    ParameterizedValue::from(self.file_path.as_ref()),
-                    ParameterizedValue::from(db),
-                ],
-            )?;
-        }
+            let mut splitted = source.url().value.split("?");
+            let url = splitted.next().unwrap();
+            let params = splitted.next();
 
-        conn.execute_raw("PRAGMA foreign_keys = ON", &[])?;
+            let mut params: Vec<&str> = match params {
+                Some(params) => params.split("&").collect(),
+                None => Vec::with_capacity(1),
+            };
 
-        let result = {
-            let mut tx = conn.start_transaction()?;
-            let result = f(&mut tx);
+            let db_name_param = format!("db_name={}", db_name);
+            params.push(&db_name_param);
 
-            if result.is_ok() {
-                tx.commit()?;
-            }
-
-            result
+            format!("{}?{}", url, params.join("&"))
         };
 
-        if self.test_mode {
-            conn.execute_raw("DETACH DATABASE ?", &[ParameterizedValue::from(db)])?;
-        }
+        let mut builder = Quaint::builder(url_with_db.as_str())
+            .map_err(SqlError::from)
+            .map_err(|sql_error| sql_error.into_connector_error(&connection_info))?;
 
-        result
+        builder.max_idle_lifetime(Duration::from_secs(300));
+        builder.health_check_interval(Duration::from_secs(15));
+        builder.test_on_check_out(true);
+
+        let pool = builder.build();
+
+        Ok(Sqlite { pool, file_path })
+    }
+}
+
+fn invalid_file_path_error(file_path: &str, connection_info: &ConnectionInfo) -> ConnectorError {
+    SqlError::ConnectionError(QuaintKind::DatabaseUrlIsInvalid(format!(
+        "\"{}\" is not a valid sqlite file path",
+        file_path
+    )))
+    .into_connector_error(&connection_info)
+}
+
+#[async_trait]
+impl Connector for Sqlite {
+    async fn get_connection<'a>(&'a self) -> connector::Result<Box<dyn Connection + 'static>> {
+        super::catch(&self.connection_info(), async move {
+            let conn = self.pool.check_out().await.map_err(SqlError::from)?;
+            let conn = SqlConnection::new(conn, self.connection_info());
+
+            Ok(Box::new(conn) as Box<dyn Connection>)
+        })
+        .await
     }
 }

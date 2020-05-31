@@ -6,30 +6,35 @@
         {
           "name": "column1",
           "tpe": {
-            "raw": "integer",
-            "family": "int"
+            "dataType": "integer",
+            "fullDataType": "int",
+            "family": "int",
+          "arity": "required"
           },
-          "arity": "required",
           "default": null,
           "autoIncrement": true
         },
         {
           "name": "column2",
           "tpe": {
-            "raw": "varchar(255)",
-            "family": "string"
+            "dataType": "varchar(255)",
+            "fullDataType": "varchar(255)",
+            "family": "string",
+          "arity": "nullable"
           },
-          "arity": "nullable",
-          "default": "default value",
+          "default": {
+            "VALUE": "default value"
+          },
           "autoIncrement": false
         },
         {
           "name": "column3",
           "tpe": {
-            "raw": "integer",
-            "family": "int"
+            "dataType": "integer",
+            "fullDataType": "integer",
+            "family": "int",
+          "arity": "required"
           },
-          "arity": "required",
           "default": null,
           "autoIncrement": false
         }
@@ -67,10 +72,11 @@
         {
           "name": "id",
           "tpe": {
-            "raw": "integer",
-            "family": "int"
+            "dataType": "integer",
+            "fullDataType": "integer",
+            "family": "int",
+          "arity": "required"
           },
-          "arity": "required",
           "default": null,
           "autoIncrement": true
         }
@@ -88,8 +94,8 @@
     {
       "name": "enum1",
       "values": [
-        "option2",
-        "option1"
+        "option1",
+        "option2"
       ]
     }
   ],

@@ -1,11 +1,13 @@
 use crate::error::SqlError;
 use chrono::{DateTime, Utc};
-use prisma_models::{EnumValue, GraphqlId, PrismaValue, Record, TypeIdentifier};
-use prisma_query::{
-    ast::{DatabaseValue, ParameterizedValue},
+use datamodel::FieldArity;
+use prisma_models::{PrismaValue, Record, TypeIdentifier};
+use quaint::{
+    ast::{Expression, Value},
     connector::ResultRow,
 };
-use std::{borrow::Borrow, io};
+use rust_decimal::Decimal;
+use std::{borrow::Borrow, io, str::FromStr};
 use uuid::Uuid;
 
 /// An allocated representation of a `Row` returned from the database.
@@ -24,115 +26,152 @@ pub trait ToSqlRow {
     /// Conversion from a database specific row to an allocated `SqlRow`. To
     /// help deciding the right types, the provided `TypeIdentifier`s should map
     /// to the returned columns in the right order.
-    fn to_sql_row<'b>(self, idents: &[TypeIdentifier]) -> crate::Result<SqlRow>;
+    fn to_sql_row<'b>(self, idents: &[(TypeIdentifier, FieldArity)]) -> crate::Result<SqlRow>;
 }
 
 impl ToSqlRow for ResultRow {
-    fn to_sql_row<'b>(self, idents: &[TypeIdentifier]) -> crate::Result<SqlRow> {
+    fn to_sql_row<'b>(self, idents: &[(TypeIdentifier, FieldArity)]) -> crate::Result<SqlRow> {
         let mut row = SqlRow::default();
         let row_width = idents.len();
 
+        row.values.reserve(row_width);
+
         for (i, p_value) in self.into_iter().enumerate().take(row_width) {
-            let pv = match idents[i] {
-                TypeIdentifier::GraphQLID | TypeIdentifier::Relation => match p_value {
-                    ParameterizedValue::Null => PrismaValue::Null,
-                    ParameterizedValue::Text(s) => {
-                        let id = Uuid::parse_str(s.borrow())
-                            .map(|uuid| GraphqlId::UUID(uuid))
-                            .unwrap_or_else(|_| GraphqlId::String(s.into_owned()));
+            let pv = match &idents[i] {
+                (type_identifier, FieldArity::List) => match p_value {
+                    Value::Array(l) => l
+                        .into_iter()
+                        .map(|p_value| row_value_to_prisma_value(p_value, &type_identifier))
+                        .collect::<crate::Result<Vec<_>>>()
+                        .map(|vec| PrismaValue::List(vec)),
 
-                        PrismaValue::GraphqlId(id)
-                    }
-                    ParameterizedValue::Integer(i) => PrismaValue::GraphqlId(GraphqlId::Int(i as usize)),
-                    ParameterizedValue::Uuid(u) => PrismaValue::GraphqlId(GraphqlId::UUID(u)),
-                    _ => {
-                        let error =
-                            io::Error::new(io::ErrorKind::InvalidData, "ID value not stored as string, int or uuid");
-                        return Err(SqlError::ConversionError(error.into()));
-                    }
-                },
-                TypeIdentifier::Boolean => match p_value {
-                    ParameterizedValue::Null => PrismaValue::Null,
-                    ParameterizedValue::Integer(i) => PrismaValue::Boolean(i != 0),
-                    ParameterizedValue::Boolean(b) => PrismaValue::Boolean(b),
-                    _ => {
-                        let error = io::Error::new(io::ErrorKind::InvalidData, "Bool value not stored as bool or int");
-                        return Err(SqlError::ConversionError(error.into()));
-                    }
-                },
-                TypeIdentifier::Enum => match p_value {
-                    ParameterizedValue::Null => PrismaValue::Null,
-                    ParameterizedValue::Text(cow) => PrismaValue::Enum(EnumValue::from(cow.into_owned())),
-                    _ => {
-                        let error = io::Error::new(io::ErrorKind::InvalidData, "Enum value not stored as text");
-                        return Err(SqlError::ConversionError(error.into()));
-                    }
-                },
-                TypeIdentifier::Json => match p_value {
-                    ParameterizedValue::Null => PrismaValue::Null,
-                    ParameterizedValue::Text(json) => PrismaValue::Json(serde_json::from_str(json.borrow())?),
-                    ParameterizedValue::Json(json) => PrismaValue::Json(json),
-                    _ => {
-                        let error = io::Error::new(io::ErrorKind::InvalidData, "Json value not stored as text or json");
-                        return Err(SqlError::ConversionError(error.into()));
-                    }
-                },
-                TypeIdentifier::UUID => match p_value {
-                    ParameterizedValue::Null => PrismaValue::Null,
-                    ParameterizedValue::Text(uuid) => PrismaValue::Uuid(Uuid::parse_str(&uuid)?),
-                    ParameterizedValue::Uuid(uuid) => PrismaValue::Uuid(uuid),
-                    _ => {
-                        let error = io::Error::new(io::ErrorKind::InvalidData, "Uuid value not stored as text or uuid");
-                        return Err(SqlError::ConversionError(error.into()));
-                    }
-                },
-                TypeIdentifier::DateTime => match p_value {
-                    ParameterizedValue::Null => PrismaValue::Null,
-                    ParameterizedValue::DateTime(dt) => PrismaValue::DateTime(dt),
-                    ParameterizedValue::Integer(ts) => {
-                        let nsecs = ((ts % 1000) * 1_000_000) as u32;
-                        let secs = (ts / 1000) as i64;
-                        let naive = chrono::NaiveDateTime::from_timestamp(secs, nsecs);
-                        let datetime: DateTime<Utc> = DateTime::from_utc(naive, Utc);
-
-                        PrismaValue::DateTime(datetime)
-                    }
-                    ParameterizedValue::Text(dt_string) => {
-                        let dt = DateTime::parse_from_rfc3339(dt_string.borrow())
-                            .or_else(|_| DateTime::parse_from_rfc2822(dt_string.borrow()))
-                            .expect(&format!("Could not parse stored DateTime string: {}", dt_string));
-
-                        PrismaValue::DateTime(dt.with_timezone(&Utc))
-                    }
+                    Value::Null => Ok(PrismaValue::List(Vec::new())),
                     _ => {
                         let error = io::Error::new(
                             io::ErrorKind::InvalidData,
-                            "DateTime value not stored as datetime, int or text",
+                            format!("List field did not return an Array from database. Type identifier was {:?}. Value was {:?}.", &type_identifier, &p_value),
                         );
                         return Err(SqlError::ConversionError(error.into()));
                     }
                 },
-                TypeIdentifier::Float => match p_value {
-                    ParameterizedValue::Null => PrismaValue::Null,
-                    ParameterizedValue::Real(f) => PrismaValue::Float(f),
-                    ParameterizedValue::Integer(i) => PrismaValue::Float(i as f64),
-                    ParameterizedValue::Text(s) => PrismaValue::Float(s.parse().unwrap()),
-                    _ => {
-                        let error = io::Error::new(
-                            io::ErrorKind::InvalidData,
-                            "Float value not stored as float, int or text",
-                        );
-                        return Err(SqlError::ConversionError(error.into()));
-                    }
-                },
-                _ => PrismaValue::from(p_value),
-            };
+                (type_identifier, _) => row_value_to_prisma_value(p_value, &type_identifier),
+            }?;
 
             row.values.push(pv);
         }
 
         Ok(row)
     }
+}
+
+pub fn row_value_to_prisma_value(p_value: Value, type_identifier: &TypeIdentifier) -> Result<PrismaValue, SqlError> {
+    Ok(match type_identifier {
+        TypeIdentifier::Boolean => match p_value {
+            // Value::Array(vec) => PrismaValue::Boolean(b),
+            Value::Null => PrismaValue::Null,
+            Value::Integer(i) => PrismaValue::Boolean(i != 0),
+            Value::Boolean(b) => PrismaValue::Boolean(b),
+            _ => {
+                let error = io::Error::new(io::ErrorKind::InvalidData, "Bool value not stored as bool or int");
+                return Err(SqlError::ConversionError(error.into()));
+            }
+        },
+        TypeIdentifier::Enum(_) => match p_value {
+            Value::Null => PrismaValue::Null,
+            Value::Enum(cow) => PrismaValue::Enum(cow.into_owned()),
+            Value::Text(cow) => PrismaValue::Enum(cow.into_owned()),
+            _ => {
+                let error = io::Error::new(io::ErrorKind::InvalidData, "Enum value not stored as enum");
+                return Err(SqlError::ConversionError(error.into()));
+            }
+        },
+
+        TypeIdentifier::Json => match p_value {
+            Value::Null => PrismaValue::Null,
+            Value::Text(json) => PrismaValue::Json(json.into()),
+            Value::Json(json) => PrismaValue::Json(json.to_string()),
+            _ => {
+                let error = io::Error::new(io::ErrorKind::InvalidData, "Json value not stored as text or json");
+                return Err(SqlError::ConversionError(error.into()));
+            }
+        },
+        TypeIdentifier::UUID => match p_value {
+            Value::Null => PrismaValue::Null,
+            Value::Text(uuid) => PrismaValue::Uuid(Uuid::parse_str(&uuid)?),
+            Value::Uuid(uuid) => PrismaValue::Uuid(uuid),
+            _ => {
+                let error = io::Error::new(io::ErrorKind::InvalidData, "Uuid value not stored as text or uuid");
+                return Err(SqlError::ConversionError(error.into()));
+            }
+        },
+        TypeIdentifier::DateTime => match p_value {
+            Value::Null => PrismaValue::Null,
+            Value::DateTime(dt) => PrismaValue::DateTime(dt),
+            Value::Integer(ts) => {
+                let nsecs = ((ts % 1000) * 1_000_000) as u32;
+                let secs = (ts / 1000) as i64;
+                let naive = chrono::NaiveDateTime::from_timestamp(secs, nsecs);
+                let datetime: DateTime<Utc> = DateTime::from_utc(naive, Utc);
+
+                PrismaValue::DateTime(datetime)
+            }
+            Value::Text(dt_string) => {
+                let dt = DateTime::parse_from_rfc3339(dt_string.borrow())
+                    .or_else(|_| DateTime::parse_from_rfc2822(dt_string.borrow()))
+                    .map_err(|err| {
+                        failure::format_err!("Could not parse stored DateTime string: {} ({})", dt_string, err)
+                    })
+                    .unwrap();
+
+                PrismaValue::DateTime(dt.with_timezone(&Utc))
+            }
+            _ => {
+                let error = io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "DateTime value not stored as datetime, int or text",
+                );
+                return Err(SqlError::ConversionError(error.into()));
+            }
+        },
+        TypeIdentifier::Float => match p_value {
+            Value::Null => PrismaValue::Null,
+            Value::Real(f) => PrismaValue::Float(f),
+            Value::Integer(i) => {
+                // Decimal::from_f64 is buggy. Issue: https://github.com/paupino/rust-decimal/issues/228
+                PrismaValue::Float(Decimal::from_str(&(i as f64).to_string()).expect("f64 was not a Decimal."))
+            }
+            Value::Text(_) | Value::Bytes(_) => PrismaValue::Float(
+                p_value
+                    .as_str()
+                    .expect("text/bytes as str")
+                    .parse()
+                    .map_err(|err: rust_decimal::Error| SqlError::ColumnReadFailure(err.into()))?,
+            ),
+            _ => {
+                let error = io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "Float value not stored as float, int or text",
+                );
+                return Err(SqlError::ConversionError(error.into()));
+            }
+        },
+        TypeIdentifier::Int => match p_value {
+            Value::Integer(i) => PrismaValue::Int(i),
+            Value::Bytes(bytes) => PrismaValue::Int(interpret_bytes_as_i64(&bytes)),
+            Value::Text(txt) => PrismaValue::Int(
+                i64::from_str(txt.trim_start_matches('\0')).map_err(|err| SqlError::ConversionError(err.into()))?,
+            ),
+            other => PrismaValue::from(other),
+        },
+        TypeIdentifier::String => match p_value {
+            Value::Uuid(uuid) => PrismaValue::String(uuid.to_string()),
+            Value::Json(json_value) => {
+                PrismaValue::String(serde_json::to_string(&json_value).expect("JSON value to string"))
+            }
+            Value::Null => PrismaValue::Null,
+            other => PrismaValue::from(other),
+        },
+    })
 }
 
 #[derive(Debug, PartialEq, Eq, Hash, Clone)]
@@ -142,17 +181,7 @@ pub enum SqlId {
     UUID(Uuid),
 }
 
-impl From<SqlId> for GraphqlId {
-    fn from(sql_id: SqlId) -> Self {
-        match sql_id {
-            SqlId::String(s) => GraphqlId::String(s),
-            SqlId::Int(i) => GraphqlId::Int(i),
-            SqlId::UUID(u) => GraphqlId::UUID(u),
-        }
-    }
-}
-
-impl From<SqlId> for DatabaseValue<'static> {
+impl From<SqlId> for Expression<'static> {
     fn from(id: SqlId) -> Self {
         match id {
             SqlId::String(s) => s.into(),
@@ -162,8 +191,89 @@ impl From<SqlId> for DatabaseValue<'static> {
     }
 }
 
-impl From<&SqlId> for DatabaseValue<'static> {
+impl From<&SqlId> for Expression<'static> {
     fn from(id: &SqlId) -> Self {
         id.clone().into()
+    }
+}
+
+// We assume the bytes are stored as a big endian signed integer, because that is what
+// mysql does if you enter a numeric value for a bits column.
+fn interpret_bytes_as_i64(bytes: &[u8]) -> i64 {
+    match bytes.len() {
+        8 => i64::from_be_bytes([
+            bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
+        ]),
+        len if len < 8 => {
+            let sign_bit_mask: u8 = 0b10000000;
+            // The first byte will only contain the sign bit.
+            let most_significant_bit_byte = bytes[0] & sign_bit_mask;
+            let padding = if most_significant_bit_byte == 0 { 0 } else { 0b11111111 };
+            let mut i64_bytes = [padding; 8];
+
+            for (target_byte, source_byte) in i64_bytes.iter_mut().rev().zip(bytes.iter().rev()) {
+                *target_byte = *source_byte;
+            }
+
+            i64::from_be_bytes(i64_bytes)
+        }
+        0 => 0,
+        _ => panic!("Attempted to interpret more than 8 bytes as an integer."),
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    #[test]
+    fn quaint_bytes_to_integer_conversion_works() {
+        // Negative i64
+        {
+            let i: i64 = -123456789123;
+            let bytes = i.to_be_bytes();
+            let roundtripped = interpret_bytes_as_i64(&bytes);
+            assert_eq!(roundtripped, i);
+        }
+
+        // Positive i64
+        {
+            let i: i64 = 123456789123;
+            let bytes = i.to_be_bytes();
+            let roundtripped = interpret_bytes_as_i64(&bytes);
+            assert_eq!(roundtripped, i);
+        }
+
+        // Positive i32
+        {
+            let i: i32 = 123456789;
+            let bytes = i.to_be_bytes();
+            let roundtripped = interpret_bytes_as_i64(&bytes);
+            assert_eq!(roundtripped, i as i64);
+        }
+
+        // Negative i32
+        {
+            let i: i32 = -123456789;
+            let bytes = i.to_be_bytes();
+            let roundtripped = interpret_bytes_as_i64(&bytes);
+            assert_eq!(roundtripped, i as i64);
+        }
+
+        // Positive i16
+        {
+            let i: i16 = 12345;
+            let bytes = i.to_be_bytes();
+            let roundtripped = interpret_bytes_as_i64(&bytes);
+            assert_eq!(roundtripped, i as i64);
+        }
+
+        // Negative i16
+        {
+            let i: i16 = -12345;
+            let bytes = i.to_be_bytes();
+            let roundtripped = interpret_bytes_as_i64(&bytes);
+            assert_eq!(roundtripped, i as i64);
+        }
     }
 }

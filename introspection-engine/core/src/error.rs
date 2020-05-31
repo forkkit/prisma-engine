@@ -1,36 +1,34 @@
-use failure::{Error, Fail};
-use std::error::Error as StdError; // just bringing the trait functions into scope
+use crate::command_error::CommandError;
+use datamodel::error::ErrorCollection;
+use introspection_connector::ConnectorError;
+use thiserror::Error;
 
-pub type CoreResult<T> = Result<T, CoreError>;
+#[derive(Debug, Error)]
+pub enum Error {
+    #[error("Error in connector: {0}")]
+    ConnectorError(ConnectorError),
 
-#[derive(Debug, Fail)]
-pub enum CoreError {
-    #[fail(display = "Couldn't parse the connection string because of: {}", message)]
-    InvalidUrl { message: String },
-    #[fail(display = "Error in connector: {}", _0)]
-    ConnectorError(Error),
+    #[error("Failure during an introspection command: {0}")]
+    CommandError(CommandError),
+
+    #[error("Error in datamodel: {:?}", .0)]
+    DatamodelError(ErrorCollection),
 }
 
-impl From<url::ParseError> for CoreError {
-    fn from(e: url::ParseError) -> Self {
-        CoreError::InvalidUrl {
-            message: format!("Couldn't parse the connection string because of: {}", e.description()),
-        }
+impl From<ConnectorError> for Error {
+    fn from(e: ConnectorError) -> Self {
+        Error::ConnectorError(e)
     }
 }
 
-impl From<introspection_connector::ConnectorError> for CoreError {
-    fn from(e: introspection_connector::ConnectorError) -> Self {
-        CoreError::ConnectorError(e.into())
+impl From<CommandError> for Error {
+    fn from(e: CommandError) -> Self {
+        Error::CommandError(e)
     }
 }
 
-impl From<CoreError> for jsonrpc_core::types::error::Error {
-    fn from(e: CoreError) -> Self {
-        jsonrpc_core::types::error::Error {
-            code: jsonrpc_core::ErrorCode::ServerError(1000),
-            message: format!("CoreError: {}", e),
-            data: None,
-        }
+impl From<datamodel::error::ErrorCollection> for Error {
+    fn from(e: datamodel::error::ErrorCollection) -> Self {
+        Error::DatamodelError(e)
     }
 }

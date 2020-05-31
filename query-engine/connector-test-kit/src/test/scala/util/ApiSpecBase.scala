@@ -2,12 +2,17 @@ package util
 
 import org.scalatest.{BeforeAndAfterAll, BeforeAndAfterEach, Suite}
 import play.api.libs.json.JsString
-import util.ConnectorCapability.{Prisma2Capability, RelationLinkListCapability}
+import util.ConnectorCapability.RelationLinkListCapability
+import wvlet.log.LogFormatter.SimpleLogFormatter
+import wvlet.log.{LogLevel, LogSupport, Logger}
 
 import scala.concurrent.ExecutionContext
 
-trait ApiSpecBase extends ConnectorAwareTest with BeforeAndAfterEach with BeforeAndAfterAll with PlayJsonExtensions with StringMatchers {
+trait ApiSpecBase extends ConnectorAwareTest with BeforeAndAfterEach with BeforeAndAfterAll with PlayJsonExtensions with StringMatchers with LogSupport {
   self: Suite =>
+
+  Logger.setDefaultFormatter(SimpleLogFormatter)
+  Logger.setDefaultLogLevel(LogLevel.apply(sys.env.getOrElse("LOG_LEVEL", "debug").toLowerCase))
 
   implicit val ec                 = ExecutionContext.global
   implicit lazy val implicitSuite = self
@@ -15,11 +20,9 @@ trait ApiSpecBase extends ConnectorAwareTest with BeforeAndAfterEach with Before
   val database                    = TestDatabase()
 
   override protected def beforeAll(): Unit = {
-    println(s"!!!!!!!!!!!!!!!!!!!!!!!!!!!!! starting ${this.getClass.getSimpleName}")
+    error(s">>> Starting ${this.getClass.getSimpleName}")
     super.beforeAll()
     PrismaRsBuild()
-    // TODO: does the migration-engine need to perform an initialize before the tests?
-//    testDependencies.deployConnector.initialize().await()
   }
 
   def escapeString(str: String) = JsString(str).toString()
@@ -28,22 +31,19 @@ trait ApiSpecBase extends ConnectorAwareTest with BeforeAndAfterEach with Before
     TestDataModelsWrapper(testDataModel, connectorTag, connector, database)
   }
 
+  implicit def abstractTestDataModelsWrapper(testDataModel: AbstractTestDataModels): AbstractTestDataModelsWrapper = {
+    AbstractTestDataModelsWrapper(testDataModel, connectorTag, connector, database)
+  }
+
   val listInlineArgument = if (capabilities.has(RelationLinkListCapability)) {
     "references: [id]"
   } else {
     ""
   }
 
-  val listInlineDirective = if (capabilities.has(RelationLinkListCapability)) {
+  val relationInlineDirective = if (capabilities.has(RelationLinkListCapability)) {
     s"@relation($listInlineArgument)"
   } else {
     ""
   }
-
-  val scalarListDirective = ""
-//  val scalarListDirective = if (capabilities.hasNot(EmbeddedScalarListsCapability)) {
-//    "@scalarList(strategy: RELATION)"
-//  } else {
-//    ""
-//  }
 }

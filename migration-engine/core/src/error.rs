@@ -1,38 +1,23 @@
 use crate::commands::CommandError;
-use datamodel::errors::ErrorCollection;
-use failure::{Error as Schwerror, Fail};
+use datamodel::error::ErrorCollection;
 use migration_connector::ConnectorError;
-use sql_migration_connector::SqlError;
-use tokio_threadpool::BlockingError;
+use thiserror::Error;
 
-#[derive(Debug, Fail)]
+pub type CoreResult<T> = Result<T, Error>;
+
+#[derive(Debug, Error)]
 pub enum Error {
-    #[fail(display = "Error in connector: {}", _0)]
+    #[error("Error in connector: {0}")]
     ConnectorError(ConnectorError),
 
-    #[fail(display = "Failure during a migration command: {}", _0)]
+    #[error("Failure during a migration command: {0}")]
     CommandError(CommandError),
 
-    #[fail(display = "Error in datamodel: {:?}", _0)]
+    #[error("Error in datamodel: {}", .0)]
     DatamodelError(ErrorCollection),
 
-    #[fail(display = "Error performing IO: {:?}", _0)]
-    IOError(Schwerror),
-
-    #[fail(display = "Threadpool error: {:?}", _0)]
-    BlockingError(BlockingError),
-}
-
-impl From<BlockingError> for Error {
-    fn from(e: BlockingError) -> Self {
-        Error::BlockingError(e)
-    }
-}
-
-impl From<SqlError> for Error {
-    fn from(e: SqlError) -> Self {
-        Error::ConnectorError(e.into())
-    }
+    #[error("Error performing IO: {:?}", .0)]
+    IOError(anyhow::Error),
 }
 
 impl From<ConnectorError> for Error {

@@ -1,42 +1,46 @@
 package util
 
-import java.io.{BufferedReader, InputStreamReader}
-import java.net.{HttpURLConnection, URL}
-import java.nio.charset.StandardCharsets
-import java.util.Base64
-import java.util.concurrent.atomic.AtomicInteger
-
 import play.api.libs.json._
+import wvlet.log.LogFormatter.SimpleLogFormatter
+import wvlet.log.{LogLevel, LogSupport, Logger}
 
-import scala.concurrent.duration.Duration
-import scala.concurrent.{Await, Awaitable, Future}
-import scala.util.Try
+import scala.sys.process.Process
+import scala.util.{Failure, Success, Try}
 
-case class QueryEngineResponse(status: Int, body: String) {
-  lazy val jsonBody: Try[JsValue] = Try(Json.parse(body))
-}
+case class TestServer() extends PlayJsonExtensions with LogSupport {
+  val logLevel = sys.env.getOrElse("LOG_LEVEL", "debug").toLowerCase
 
-case class TestServer() extends PlayJsonExtensions {
-  import scala.concurrent.ExecutionContext.Implicits.global
+  Logger.setDefaultFormatter(SimpleLogFormatter)
+  Logger.setDefaultLogLevel(LogLevel.apply(logLevel))
 
   def query(
       query: String,
       project: Project,
-      dataContains: String = ""
+      dataContains: String = "",
+      legacy: Boolean = true,
+      batchSize: Int = 5000,
   ): JsValue = {
-    awaitInfinitely { queryAsync(query, project, dataContains) }
+    val result = queryBinaryCLI(
+      request = createSingleQuery(query),
+      project = project,
+      legacy = legacy,
+      batchSize = batchSize,
+    )
+    result.assertSuccessfulResponse(dataContains)
+    result
   }
 
-  def queryAsync(query: String, project: Project, dataContains: String = ""): Future[JsValue] = {
-    val result = querySchemaAsync(
-      query = query.stripMargin,
+  def batch(
+      queries: Array[String],
+      project: Project,
+      legacy: Boolean = true,
+  ): JsValue = {
+    val result = queryBinaryCLI(
+      request = createMultiQuery(queries),
       project = project,
+      legacy = legacy,
     )
-
-    result.map { r =>
-      r.assertSuccessfulResponse(dataContains)
-      r
-    }
+    result
   }
 
   def queryThatMustFail(
@@ -44,96 +48,115 @@ case class TestServer() extends PlayJsonExtensions {
       project: Project,
       errorCode: Int,
       errorCount: Int = 1,
-      errorContains: String = ""
+      errorContains: String = "",
+      legacy: Boolean = true,
+      // Assertions of the form (jsonPath, expectedValue).
+      errorMetaContains: Array[(String, String)] = Array.empty,
   ): JsValue = {
-    val result = awaitInfinitely {
-      querySchemaAsync(
-        query = query,
+    val result =
+      queryBinaryCLI(
+        request = createSingleQuery(query),
         project = project,
+        legacy = legacy,
       )
-    }
 
-    // TODO: bring those error checks back
     // Ignore error codes for external tests (0) and containment checks ("")
-    result.assertFailingResponse(0, errorCount, "")
+    result.assertFailingResponse(errorCode, errorCount, errorContains, errorMetaContains)
     result
   }
 
-  private def querySchemaAsync(
-      query: String,
-      project: Project
-  ): Future[JsValue] = {
-    val (port, queryEngineProcess) = startQueryEngine(project)
-    println(s"query engine started on port $port")
-    println(s"Query: $query")
-    Future {
-      queryPrismaProcess(query, port)
-    }.map(r => r.jsonBody.get)
-      .transform { r =>
-        println(s"Query result: $r")
-        queryEngineProcess.destroyForcibly().waitFor()
-        r
-      }
+  def createSingleQuery(query: String): JsValue = {
+    val formattedQuery = query.stripMargin.replace("\n", "")
+    debug(formattedQuery)
+    Json.obj("query" -> formattedQuery, "variables" -> Json.obj())
   }
 
-  val nextPort = new AtomicInteger(4000)
-
-  private def startQueryEngine(project: Project): (Int, java.lang.Process) = {
-    import java.lang.ProcessBuilder.Redirect
-
-    // TODO: discuss with Dom whether we want to keep the legacy mode
-    val pb         = new java.lang.ProcessBuilder(EnvVars.prismaBinaryPath, "--legacy")
-    val workingDir = new java.io.File(".")
-
-    val fullDataModel = project.dataModelWithDataSourceConfig
-    // Important: Rust requires UTF-8 encoding (encodeToString uses Latin-1)
-    val encoded = Base64.getEncoder.encode(fullDataModel.getBytes(StandardCharsets.UTF_8))
-    val envVar  = new String(encoded, StandardCharsets.UTF_8)
-    val port    = nextPort.incrementAndGet()
-
-    pb.environment.put("PRISMA_DML", envVar)
-    pb.environment.put("PORT", port.toString)
-
-    pb.directory(workingDir)
-    pb.redirectErrorStream(true)
-    pb.redirectOutput(Redirect.INHERIT)
-
-    val process = pb.start
-    Thread.sleep(100) // Offsets process startup latency
-    (port, process)
+  def createMultiQuery(queries: Array[String]): JsValue = {
+    Json.obj("batch" -> queries.map(createSingleQuery))
   }
 
-  private def queryPrismaProcess(query: String, port: Int): QueryEngineResponse = {
-    val url = new URL(s"http://127.0.0.1:$port")
-    val con = url.openConnection().asInstanceOf[HttpURLConnection]
+  def queryBinaryCLI(request: JsValue, project: Project, legacy: Boolean = true, batchSize: Int = 5000) = {
+    val encoded_query  = UTF8Base64.encode(Json.stringify(request))
+    val binaryLogLevel = "RUST_LOG" -> s"query_engine=$logLevel,quaint=$logLevel,query_core=$logLevel,query_connector=$logLevel,sql_query_connector=$logLevel,prisma_models=$logLevel,sql_introspection_connector=$logLevel"
 
-    con.setDoOutput(true)
-    con.setRequestMethod("POST")
-    con.setRequestProperty("Content-Type", "application/json")
+    val response = (project.isPgBouncer, legacy) match {
+      case (true, true) =>
+        Process(
+          Seq(
+            EnvVars.prismaBinaryPath,
+            "--enable-raw-queries",
+            "cli",
+            "execute-request",
+            "--legacy",
+            encoded_query
+          ),
+          None,
+          "PRISMA_DML"       -> project.pgBouncerEnvVar,
+          "QUERY_BATCH_SIZE" -> batchSize.toString,
+          binaryLogLevel,
+        ).!!
 
-    val body = Json.obj("query" -> query, "variables" -> Json.obj()).toString()
-    con.setRequestProperty("Content-Length", Integer.toString(body.length))
-    con.getOutputStream.write(body.getBytes(StandardCharsets.UTF_8))
+      case (true, false) =>
+        Process(
+          Seq(
+            EnvVars.prismaBinaryPath,
+            "--enable-raw-queries",
+            "cli",
+            "execute-request",
+            encoded_query
+          ),
+          None,
+          "PRISMA_DML"       -> project.pgBouncerEnvVar,
+          "QUERY_BATCH_SIZE" -> batchSize.toString,
+          binaryLogLevel,
+        ).!!
 
-    try {
-      val status = con.getResponseCode
-      val streamReader = if (status > 299) {
-        new InputStreamReader(con.getErrorStream, "utf8")
-      } else {
-        new InputStreamReader(con.getInputStream, "utf8")
-      }
+      case (false, true) =>
+        Process(
+          Seq(
+            EnvVars.prismaBinaryPath,
+            "--enable-raw-queries",
+            "cli",
+            "execute-request",
+            "--legacy",
+            encoded_query
+          ),
+          None,
+          "PRISMA_DML"       -> project.envVar,
+          "QUERY_BATCH_SIZE" -> batchSize.toString,
+          binaryLogLevel,
+        ).!!
 
-      val in     = new BufferedReader(streamReader)
-      val buffer = new StringBuffer
+      case (false, false) =>
+        Process(
+          Seq(
+            EnvVars.prismaBinaryPath,
+            "--enable-raw-queries",
+            "cli",
+            "execute-request",
+            encoded_query
+          ),
+          None,
+          "PRISMA_DML"       -> project.envVar,
+          "QUERY_BATCH_SIZE" -> batchSize.toString,
+          binaryLogLevel,
+        ).!!
+    }
 
-      Stream.continually(in.readLine()).takeWhile(_ != null).foreach(buffer.append)
-      QueryEngineResponse(status, buffer.toString)
-    } catch {
-      case e: Throwable => QueryEngineResponse(999, s"""{"errors": [{"message": "Connection error: $e"}]}""")
-    } finally {
-      con.disconnect()
+    val lines = response.linesIterator.toVector
+    debug(lines.mkString("\n"))
+
+    val responseMarker = "Response: " // due to race conditions the response can not always be found in the last line
+    val responseLine   = lines.find(_.startsWith(responseMarker)).get.stripPrefix(responseMarker).stripSuffix("\n")
+
+    Try(UTF8Base64.decode(responseLine)) match {
+      case Success(decodedResponse) =>
+        debug(decodedResponse)
+        Json.parse(decodedResponse)
+
+      case Failure(e) =>
+        error(s"Error while decoding this line: \n$responseLine")
+        throw e
     }
   }
-
-  private def awaitInfinitely[T](awaitable: Awaitable[T]): T = Await.result(awaitable, Duration.Inf)
 }
